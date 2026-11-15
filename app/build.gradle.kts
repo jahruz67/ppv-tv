@@ -16,8 +16,8 @@ android {
     applicationId = "com.aistudio.ppvst.kxmtvr"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    versionCode = (System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 0) + 2
+    versionName = "1.0.${System.getenv("GITHUB_RUN_NUMBER") ?: "2"}"
 
     buildConfigField("String", "PPV_API_BASE_URL", "\"https://api.ppv.st/\"")
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
