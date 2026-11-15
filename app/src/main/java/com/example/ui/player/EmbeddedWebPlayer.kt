@@ -172,7 +172,7 @@ private class PpvEmbedBridge(
                     onPlaying()
                 }
                 "buffering" -> {
-                    if (!controller.userPausedNow) {
+                    if (!controller.hasReportedTerminalOrReady && !controller.userPausedNow) {
                         controller.isPlayingNow = false
                         onBuffering()
                     }
@@ -375,7 +375,6 @@ fun EmbeddedWebPlayer(
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                 webView.removeCallbacks(fallbackReadyRunnable)
                 controller.pageFinished = false
-                onBuffering()
                 if (url != null && url != "about:blank") {
                     view?.evaluateJavascript(EMBED_COMPAT_SCRIPT, null)
                 }
@@ -397,7 +396,7 @@ fun EmbeddedWebPlayer(
                     )
                     CookieManager.getInstance().flush()
                     webView.removeCallbacks(fallbackReadyRunnable)
-                    webView.postDelayed(fallbackReadyRunnable, 5_000L)
+                    webView.postDelayed(fallbackReadyRunnable, 8_000L)
                 }
             }
 
@@ -471,7 +470,6 @@ fun EmbeddedWebPlayer(
             if (lastLoadedKey != key) {
                 lastLoadedKey = key
                 controller.resetForLoad(embedUrl)
-                onBuffering()
                 val headers = mapOf("Referer" to "https://ppv.st/")
                 webView.loadUrl(embedUrl, headers)
             }
@@ -484,9 +482,9 @@ fun EmbeddedWebPlayer(
  * 1) Neutralizes `sandDetect` PDF-plugin probes & strips `iframe[sandbox]` so WebView never
  *    shows "Remove sandbox attributes on the iframe tag".
  * 2) Suppresses popunder ad windows (`window.open`) that steal focus or intercept clicks.
- * 3) Hooks `window.jwplayer`, `window.Clappr`, and `<video>` elements to force `autostart: true`,
- *    monitor real playback state, and escalate to a trusted native tap / muted autoplay fallback
- *    when the embed stalls on a black screen with a white play button.
+ * 3) Hooks `window.jwplayer` and `<video>` elements to force `autostart: true` with sound on
+ *    (`mute: false`), monitors real playback state, and avoids interfering while buffering or
+ *    once playback has started.
  */
 private const val EMBED_COMPAT_SCRIPT = """
 (function() {
@@ -510,8 +508,7 @@ private const val EMBED_COMPAT_SCRIPT = """
   if (window.__ppvEmbedGuardInstalled) return;
   window.__ppvEmbedGuardInstalled = true;
   window.__ppvUserPaused = false;
-  window.__ppvMutedForAutoplay = false;
-  window.__ppvUnmuteAttempted = false;
+  window.__ppvUserToggledMute = false;
   window.__ppvHasStarted = false;
 
   var noop = function() {};
@@ -583,6 +580,24 @@ private const val EMBED_COMPAT_SCRIPT = """
     return false;
   }
 
+  function isPlayingOrBuffering() {
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      var v = vids[i];
+      if (!v.paused && !v.ended) {
+        return true;
+      }
+    }
+    var jw = getJwInstance();
+    if (jw && typeof jw.getState === 'function') {
+      try {
+        var st = jw.getState();
+        if (st === 'playing' || st === 'buffering') return true;
+      } catch (e) {}
+    }
+    return false;
+  }
+
   function getCurrentMuted() {
     var jw = getJwInstance();
     if (jw && typeof jw.getMute === 'function') {
@@ -591,6 +606,30 @@ private const val EMBED_COMPAT_SCRIPT = """
     var v = getAnyVideo();
     if (v) return !!v.muted;
     return false;
+  }
+
+  function ensureUnmutedByDefault(inst) {
+    if (window.__ppvUserToggledMute) return;
+    if (inst && typeof inst.setMute === 'function') {
+      try {
+        if (typeof inst.getMute !== 'function' || inst.getMute()) {
+          inst.setMute(false);
+        }
+        if (typeof inst.setVolume === 'function' && typeof inst.getVolume === 'function' && inst.getVolume() === 0) {
+          inst.setVolume(100);
+        }
+      } catch (e) {}
+    }
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      try { vids[i].removeAttribute('muted'); } catch (e) {}
+      if (vids[i].muted) {
+        try { vids[i].muted = false; } catch (e) {}
+      }
+      if (vids[i].volume === 0) {
+        try { vids[i].volume = 1; } catch (e) {}
+      }
+    }
   }
 
   var lastReportedState = '';
@@ -661,12 +700,18 @@ private const val EMBED_COMPAT_SCRIPT = """
     try {
       v.playsInline = true;
       v.autoplay = true;
+      if (!window.__ppvUserToggledMute) {
+        v.removeAttribute('muted');
+        v.muted = false;
+        if (v.volume === 0) v.volume = 1;
+      }
       v.setAttribute('playsinline', '');
       v.setAttribute('autoplay', '');
     } catch (e) {}
 
     v.addEventListener('playing', function() {
       window.__ppvHasStarted = true;
+      ensureUnmutedByDefault(getJwInstance());
       reportState('playing', !!v.muted);
     });
     v.addEventListener('pause', function() {
@@ -680,10 +725,12 @@ private const val EMBED_COMPAT_SCRIPT = """
       }
     });
     v.addEventListener('volumechange', function() {
-      reportState(isVideoPlaying() ? 'playing' : lastReportedState || 'paused', !!v.muted);
+      var st = isVideoPlaying() ? 'playing' : (window.__ppvUserPaused ? 'paused' : (lastReportedState || 'buffering'));
+      reportState(st, !!v.muted);
     });
     v.addEventListener('canplay', function() {
-      if (!window.__ppvUserPaused && v.paused) {
+      if (!window.__ppvUserPaused && !window.__ppvHasStarted && v.paused) {
+        ensureUnmutedByDefault(getJwInstance());
         try {
           var p = v.play();
           if (p && typeof p.catch === 'function') p.catch(function() {});
@@ -699,33 +746,6 @@ private const val EMBED_COMPAT_SCRIPT = """
     }
   }
 
-  function tryAutoUnmute(inst) {
-    if (!window.__ppvMutedForAutoplay || window.__ppvUnmuteAttempted) return;
-    window.__ppvUnmuteAttempted = true;
-    setTimeout(function() {
-      try {
-        if (inst && typeof inst.setMute === 'function') inst.setMute(false);
-        var vids = document.querySelectorAll('video');
-        for (var i = 0; i < vids.length; i++) vids[i].muted = false;
-        setTimeout(function() {
-          if (!isVideoPlaying() && !window.__ppvUserPaused) {
-            // Re-mute if unmuting triggered autoplay pause policy
-            if (inst && typeof inst.setMute === 'function') inst.setMute(true);
-            for (var j = 0; j < vids.length; j++) vids[j].muted = true;
-            try { if (inst && typeof inst.play === 'function') inst.play(); } catch (e) {}
-            for (var k = 0; k < vids.length; k++) {
-              try { vids[k].play(); } catch (e) {}
-            }
-            reportState(isVideoPlaying() ? 'playing' : 'paused', true);
-          } else {
-            window.__ppvMutedForAutoplay = false;
-            reportState('playing', false);
-          }
-        }, 350);
-      } catch (e) {}
-    }, 500);
-  }
-
   function attachJwEvents(inst) {
     if (!inst || inst.__ppvEventsAttached || typeof inst.on !== 'function') return;
     inst.__ppvEventsAttached = true;
@@ -733,25 +753,26 @@ private const val EMBED_COMPAT_SCRIPT = """
 
     inst.on('ready', function() {
       scanVideos();
-      if (!window.__ppvUserPaused) {
+      ensureUnmutedByDefault(inst);
+      if (!window.__ppvUserPaused && !window.__ppvHasStarted && !isPlayingOrBuffering()) {
         try { inst.play(); } catch (e) {}
-        setTimeout(function() { ensurePlaying(false, false); }, 400);
+        setTimeout(function() { ensurePlaying(false); }, 450);
       }
     });
     inst.on('autostartNotAllowed', function() {
-      if (!window.__ppvUserPaused) {
-        ensurePlaying(true, false);
+      if (!window.__ppvUserPaused && !window.__ppvHasStarted && !isPlayingOrBuffering()) {
+        ensurePlaying(true);
       }
     });
     inst.on('play', function() {
       window.__ppvHasStarted = true;
+      ensureUnmutedByDefault(inst);
       reportState('playing', getCurrentMuted());
-      tryAutoUnmute(inst);
     });
     inst.on('firstFrame', function() {
       window.__ppvHasStarted = true;
+      ensureUnmutedByDefault(inst);
       reportState('playing', getCurrentMuted());
-      tryAutoUnmute(inst);
     });
     inst.on('buffer', function() {
       if (!window.__ppvUserPaused && !isVideoPlaying()) {
@@ -769,7 +790,8 @@ private const val EMBED_COMPAT_SCRIPT = """
       }
     });
     inst.on('mute', function(ev) {
-      reportState(isVideoPlaying() ? 'playing' : (lastReportedState || 'paused'), !!(ev && ev.mute));
+      var st = isVideoPlaying() ? 'playing' : (window.__ppvUserPaused ? 'paused' : (lastReportedState || 'buffering'));
+      reportState(st, !!(ev && ev.mute));
     });
   }
 
@@ -786,7 +808,10 @@ private const val EMBED_COMPAT_SCRIPT = """
           if (!window.__ppvUserPaused) {
             cfg.autostart = true;
           }
-          if (cfg.mute === undefined) cfg.mute = false;
+          if (!window.__ppvUserToggledMute) {
+            cfg.mute = false;
+            if (!cfg.volume) cfg.volume = 100;
+          }
           if (cfg.autoPause && typeof cfg.autoPause === 'object') {
             cfg.autoPause.viewability = false;
           }
@@ -839,25 +864,32 @@ private const val EMBED_COMPAT_SCRIPT = """
     } catch (e) {}
   }
 
-  function ensurePlaying(allowTap, allowMute) {
-    if (window.__ppvUserPaused) return;
+  function ensurePlaying(allowTap) {
+    if (window.__ppvUserPaused || window.__ppvHasStarted) return;
     scanVideos();
     if (isVideoPlaying()) {
+      window.__ppvHasStarted = true;
+      ensureUnmutedByDefault(getJwInstance());
       reportState('playing', getCurrentMuted());
+      return;
+    }
+    // Never interrupt or re-trigger a stream that is actively buffering
+    if (isPlayingOrBuffering()) {
       return;
     }
     var jw = getJwInstance();
     if (jw) {
       attachJwEvents(jw);
+      ensureUnmutedByDefault(jw);
       var st = '';
       try { st = jw.getState(); } catch (e) {}
       if (st === 'playing') {
+        window.__ppvHasStarted = true;
         reportState('playing', getCurrentMuted());
         return;
       }
-      if (allowMute && typeof jw.setMute === 'function') {
-        window.__ppvMutedForAutoplay = true;
-        try { jw.setMute(true); } catch (e) {}
+      if (st === 'buffering') {
+        return;
       }
       if (typeof jw.play === 'function') {
         try { jw.play(); } catch (e) {}
@@ -868,9 +900,8 @@ private const val EMBED_COMPAT_SCRIPT = """
     for (var i = 0; i < vids.length; i++) {
       var v = vids[i];
       if (v.paused && (v.currentSrc || v.src || v.srcObject || v.readyState >= 1)) {
-        if (allowMute) {
-          window.__ppvMutedForAutoplay = true;
-          v.muted = true;
+        if (!window.__ppvUserToggledMute) {
+          v.muted = false;
         }
         try {
           var pr = v.play();
@@ -881,7 +912,7 @@ private const val EMBED_COMPAT_SCRIPT = """
       }
     }
 
-    if (allowTap && !isVideoPlaying()) {
+    if (allowTap && !isPlayingOrBuffering() && !window.__ppvHasStarted) {
       var target = findPlayButtonCoords();
       if (target.el && typeof target.el.click === 'function') {
         try { target.el.click(); } catch (e) {}
@@ -894,33 +925,39 @@ private const val EMBED_COMPAT_SCRIPT = """
 
   var watchdogTimer = null;
   window.__ppvStartAutoplayWatchdog = function() {
-    if (watchdogTimer) {
-      clearInterval(watchdogTimer);
-      watchdogTimer = null;
+    if (watchdogTimer || window.__ppvHasStarted || window.__ppvUserPaused) {
+      return;
     }
     var ticks = 0;
     watchdogTimer = setInterval(function() {
       ticks += 1;
       scanVideos();
-      if (window.__ppvUserPaused) {
+      if (window.__ppvUserPaused || window.__ppvHasStarted) {
         clearInterval(watchdogTimer);
         watchdogTimer = null;
         return;
       }
       if (isVideoPlaying()) {
+        window.__ppvHasStarted = true;
+        ensureUnmutedByDefault(getJwInstance());
         reportState('playing', getCurrentMuted());
         clearInterval(watchdogTimer);
         watchdogTimer = null;
         return;
       }
+      if (isPlayingOrBuffering()) {
+        if (ticks >= 24) {
+          clearInterval(watchdogTimer);
+          watchdogTimer = null;
+        }
+        return;
+      }
       if (ticks === 1 || ticks === 2) {
-        ensurePlaying(false, false);
+        ensurePlaying(false);
       } else if (ticks === 3 || ticks === 5) {
-        ensurePlaying(true, false);
-      } else if (ticks === 7) {
-        ensurePlaying(true, true);
-      } else if (ticks >= 10) {
-        if (!isVideoPlaying()) {
+        ensurePlaying(true);
+      } else if (ticks >= 12) {
+        if (!isPlayingOrBuffering()) {
           reportState('paused', getCurrentMuted());
         }
         clearInterval(watchdogTimer);
@@ -933,6 +970,7 @@ private const val EMBED_COMPAT_SCRIPT = """
     window.__ppvUserPaused = false;
     scanVideos();
     var jw = getJwInstance();
+    ensureUnmutedByDefault(jw);
     if (jw && typeof jw.play === 'function') {
       try { jw.play(); } catch (e) {}
     }
@@ -944,7 +982,7 @@ private const val EMBED_COMPAT_SCRIPT = """
       } catch (e) {}
     }
     setTimeout(function() {
-      if (!isVideoPlaying() && !window.__ppvUserPaused) {
+      if (!isPlayingOrBuffering() && !window.__ppvUserPaused) {
         var target = findPlayButtonCoords();
         if (target.el && typeof target.el.click === 'function') {
           try { target.el.click(); } catch (e) {}
@@ -970,8 +1008,8 @@ private const val EMBED_COMPAT_SCRIPT = """
   };
 
   window.__ppvUserActionToggleMute = function() {
+    window.__ppvUserToggledMute = true;
     var nextMuted = !getCurrentMuted();
-    window.__ppvMutedForAutoplay = false;
     var jw = getJwInstance();
     if (jw && typeof jw.setMute === 'function') {
       try { jw.setMute(nextMuted); } catch (e) {}
@@ -1021,8 +1059,8 @@ private const val EMBED_COMPAT_SCRIPT = """
           }
         }
       }
-      if (foundVideo && !window.__ppvUserPaused) {
-        ensurePlaying(false, false);
+      if (foundVideo && !window.__ppvUserPaused && !window.__ppvHasStarted) {
+        ensurePlaying(false);
       }
     });
     window.__ppvSandboxObserver.observe(document.documentElement, { childList: true, subtree: true });

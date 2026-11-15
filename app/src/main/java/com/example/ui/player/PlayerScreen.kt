@@ -7,6 +7,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -91,7 +92,7 @@ fun PlayerScreen(
     val webEmbedController = remember { WebEmbedController() }
 
     val retryFocusRequester = remember { FocusRequester() }
-    val menuPillFocusRequester = remember { FocusRequester() }
+    val hiddenPlayerFocusRequester = remember { FocusRequester() }
     val primaryOverlayFocus = remember { FocusRequester() }
 
     BackHandler {
@@ -109,11 +110,14 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(state.controlsVisible) {
+    LaunchedEffect(state.controlsVisible, state.playbackStatus) {
+        if (state.playbackStatus is PlaybackStatus.Error || state.playbackStatus is PlaybackStatus.Unsupported) {
+            return@LaunchedEffect
+        }
         if (state.controlsVisible) {
             runCatching { primaryOverlayFocus.requestFocus() }
         } else {
-            runCatching { menuPillFocusRequester.requestFocus() }
+            runCatching { hiddenPlayerFocusRequester.requestFocus() }
         }
     }
 
@@ -193,7 +197,10 @@ fun PlayerScreen(
                             false
                         }
                     }
-                    KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                    KeyEvent.KEYCODE_DPAD_UP,
+                    KeyEvent.KEYCODE_DPAD_DOWN,
+                    KeyEvent.KEYCODE_DPAD_LEFT,
+                    KeyEvent.KEYCODE_DPAD_RIGHT -> {
                         if (!state.controlsVisible) {
                             viewModel.showControls()
                             true
@@ -239,39 +246,24 @@ fun PlayerScreen(
             }
         }
 
-        // Always-reachable discreet Menu pill when controls are hidden to guarantee no focus trap
-        if (!state.controlsVisible && state.playbackStatus is PlaybackStatus.Playing) {
-            Surface(
-                onClick = { viewModel.showControls() },
+        // Invisible focus anchor when controls are hidden so D-pad events always reach the root Box
+        if (!state.controlsVisible &&
+            state.playbackStatus !is PlaybackStatus.Error &&
+            state.playbackStatus !is PlaybackStatus.Unsupported
+        ) {
+            Box(
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(20.dp)
-                    .focusRequester(menuPillFocusRequester)
-                    .testTag("player_collapsed_menu_pill"),
-                shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(20.dp)),
-                colors = ClickableSurfaceDefaults.colors(
-                    containerColor = Color.Black.copy(alpha = 0.55f),
-                    focusedContainerColor = TvPrimary,
-                    contentColor = TvTextPrimary,
-                ),
-                border = ClickableSurfaceDefaults.border(
-                    border = Border(BorderStroke(1.dp, TvBorderSubtle)),
-                    focusedBorder = Border(BorderStroke(2.dp, TvFocusRing)),
-                ),
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    Icon(Icons.Filled.Tune, contentDescription = "Controls", modifier = Modifier.size(16.dp))
-                    Text("Menu / Sources", style = MaterialTheme.typography.labelLarge)
-                }
-            }
+                    .size(1.dp)
+                    .focusRequester(hiddenPlayerFocusRequester)
+                    .focusable()
+                    .testTag("player_hidden_focus_anchor"),
+            )
         }
 
-        // Buffering indicator
-        if (state.playbackStatus is PlaybackStatus.Preparing || state.playbackStatus is PlaybackStatus.Buffering) {
+        // Show loading overlay for Media3 buffering/preparing, and only during initial Preparing for web embeds
+        val showLoadingIndicator = state.playbackStatus is PlaybackStatus.Preparing ||
+            (state.playbackStatus is PlaybackStatus.Buffering && activeSource?.playbackMode == PlaybackMode.NATIVE_MEDIA3)
+        if (showLoadingIndicator) {
             Box(
                 modifier = Modifier
                     .align(Alignment.Center)

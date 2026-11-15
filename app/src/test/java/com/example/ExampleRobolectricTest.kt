@@ -313,5 +313,81 @@ class ExampleRobolectricTest {
         composeTestRule.onNodeWithTag("player_play_pause_button").assertIsDisplayed()
         composeTestRule.onNodeWithTag("player_play_pause_button").assertIsFocused()
         composeTestRule.onNodeWithTag("player_mute_button").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Mute").assertIsDisplayed()
+        assertFalse(playerVm.uiState.value.isMuted)
+    }
+
+    @OptIn(ExperimentalTestApi::class)
+    @Test
+    fun `player screen hides overlay without top right pill and wakes overlay on dpad`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = UserPreferencesDataStore(context)
+        val playerVm = PlayerViewModel(prefs)
+        val event = SportEvent(
+            id = 888,
+            title = "Live Championship",
+            leagueTag = "UFC",
+            categoryId = 20,
+            categoryName = "MMA",
+            posterUrl = null,
+            accentColors = emptyList(),
+            uriName = "live-champ",
+            startsAtEpochSec = 1794720000L,
+            endsAtEpochSec = 1794730000L,
+            alwaysLive = false,
+            status = EventStatus.LIVE,
+            viewers = 250,
+            sources = listOf(
+                StreamSource(
+                    id = "s_embed",
+                    label = "HD | Main Feed",
+                    broadcaster = "Main Feed",
+                    quality = "HD",
+                    language = "EN",
+                    tag = "UFC",
+                    url = "https://taifood-blog.asia/embed/live-champ",
+                    playbackMode = PlaybackMode.WEB_EMBED,
+                    isPrimary = true,
+                ),
+            ),
+        )
+        playerVm.initialize(event, 0)
+        playerVm.onPlaying()
+
+        composeTestRule.setContent {
+            PpvTvTheme {
+                PlayerScreen(
+                    viewModel = playerVm,
+                    onBackToEvent = {},
+                )
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        // Re-initializing with the same event/source (e.g. periodic catalog refresh during buffering)
+        // must not reset playback or increment reloadNonce, and buffering must not show the embed overlay.
+        playerVm.onBuffering()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Loading broadcast embed...").assertDoesNotExist()
+        val nonceBeforeRefresh = playerVm.uiState.value.reloadNonce
+        playerVm.initialize(event, 0)
+        assertEquals(nonceBeforeRefresh, playerVm.uiState.value.reloadNonce)
+        assertEquals(com.example.ui.player.PlaybackStatus.Buffering, playerVm.uiState.value.playbackStatus)
+
+        playerVm.onPlaying()
+        playerVm.toggleControls()
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("player_collapsed_menu_pill").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("player_hidden_focus_anchor").assertIsFocused()
+
+        composeTestRule.onNodeWithTag("player_hidden_focus_anchor").performKeyInput {
+            pressKey(Key.DirectionCenter)
+        }
+        composeTestRule.waitForIdle()
+
+        assertTrue(playerVm.uiState.value.controlsVisible)
+        composeTestRule.onNodeWithTag("player_play_pause_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("player_play_pause_button").assertIsFocused()
     }
 }

@@ -65,6 +65,14 @@ class PlayerViewModel(
             return
         }
         val safeIndex = initialSourceIndex.coerceIn(0, (event.sources.size - 1).coerceAtLeast(0))
+        val current = _uiState.value
+        if (current.event?.id == event.id &&
+            current.selectedSourceIndex == safeIndex &&
+            current.playbackStatus !is PlaybackStatus.Error &&
+            current.playbackStatus !is PlaybackStatus.Unsupported
+        ) {
+            return
+        }
         val source = event.sources.getOrNull(safeIndex)
         val initialStatus = when {
             source == null -> PlaybackStatus.Unsupported("No stream sources are available for this event.")
