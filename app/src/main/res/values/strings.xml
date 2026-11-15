@@ -1,0 +1,32 @@
+<resources>
+    <string name="app_name">PPV.st TV</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_categories">Categories</string>
+    <string name="nav_channels">24/7 TV</string>
+    <string name="nav_favorites">Favorites</string>
+    <string name="nav_search">Search</string>
+    <string name="section_live_now">Live Now</string>
+    <string name="section_upcoming">Upcoming Events</string>
+    <string name="section_channels">24/7 Channels</string>
+    <string name="section_categories">Sports Categories</string>
+    <string name="section_favorites">Favorites</string>
+    <string name="action_refresh">Refresh</string>
+    <string name="action_retry">Retry</string>
+    <string name="action_watch_now">Watch Now</string>
+    <string name="action_change_source">Change Source</string>
+    <string name="action_back_to_event">Back to Event</string>
+    <string name="action_favorite">Add to Favorites</string>
+    <string name="action_unfavorite">Remove Favorite</string>
+    <string name="status_live">LIVE</string>
+    <string name="status_upcoming">UPCOMING</string>
+    <string name="status_ended">ENDED</string>
+    <string name="status_always_live">24/7</string>
+    <string name="search_hint">Search matches, teams, sports, or channels</string>
+    <string name="empty_favorites_title">No Favorites Saved Yet</string>
+    <string name="empty_favorites_hint">Open any event or 24/7 channel and press Favorite to pin it here for quick access.</string>
+    <string name="empty_search_title">No Matching Streams</string>
+    <string name="empty_search_hint">Try searching by team name, league, sport category, or broadcaster.</string>
+    <string name="player_mode_native">Native Media3</string>
+    <string name="player_mode_embed">Web Embed</string>
+    <string name="fixture_banner_notice">Live API unavailable — showing offline verification fixtures</string>
+</resources>

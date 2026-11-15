@@ -1,0 +1,6 @@
+{
+  "name": "PPV.st TV",
+  "description": "Native Android TV live sports and 24/7 channels player powered by the PPV.st API with Media3 ExoPlayer, WebView embed support, and D-pad navigation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
