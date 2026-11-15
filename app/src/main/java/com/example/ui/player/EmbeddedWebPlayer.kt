@@ -1,11 +1,16 @@
 package com.example.ui.player
 
 import android.annotation.SuppressLint
+import android.graphics.Bitmap
 import android.graphics.Color as AndroidColor
+import android.net.Uri
 import android.os.Message
+import android.os.SystemClock
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
@@ -15,8 +20,10 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
+import androidx.annotation.Keep
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,13 +38,178 @@ import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 
-@SuppressLint("SetJavaScriptEnabled")
+@Stable
+class WebEmbedController {
+    private var webView: WebView? = null
+    internal var isPlayingNow: Boolean = false
+    internal var isMutedNow: Boolean = false
+    internal var userPausedNow: Boolean = false
+    internal var hasReportedTerminalOrReady: Boolean = false
+    internal var autoTapAttempts: Int = 0
+    internal var initialHost: String? = null
+    internal var pageFinished: Boolean = false
+
+    internal fun attach(view: WebView) {
+        webView = view
+    }
+
+    internal fun detach(view: WebView) {
+        if (webView === view) {
+            webView = null
+        }
+    }
+
+    internal fun resetForLoad(embedUrl: String) {
+        isPlayingNow = false
+        isMutedNow = false
+        userPausedNow = false
+        hasReportedTerminalOrReady = false
+        autoTapAttempts = 0
+        pageFinished = false
+        initialHost = runCatching { Uri.parse(embedUrl).host?.lowercase() }.getOrNull()
+    }
+
+    fun play() {
+        userPausedNow = false
+        val view = webView ?: return
+        view.post {
+            view.evaluateJavascript(
+                "window.__ppvUserActionPlay && window.__ppvUserActionPlay();",
+                null,
+            )
+        }
+    }
+
+    fun pause() {
+        userPausedNow = true
+        isPlayingNow = false
+        val view = webView ?: return
+        view.post {
+            view.evaluateJavascript(
+                "window.__ppvUserActionPause && window.__ppvUserActionPause();",
+                null,
+            )
+        }
+    }
+
+    fun togglePlayPause() {
+        if (isPlayingNow) {
+            pause()
+        } else {
+            play()
+        }
+    }
+
+    fun toggleMute() {
+        val view = webView ?: return
+        view.post {
+            view.evaluateJavascript(
+                "window.__ppvUserActionToggleMute && window.__ppvUserActionToggleMute();",
+                null,
+            )
+        }
+    }
+
+    internal fun dispatchTrustedTap(normX: Float, normY: Float) {
+        val view = webView ?: return
+        view.post {
+            val w = view.width
+            val h = view.height
+            if (w <= 0 || h <= 0) return@post
+            val tapX = w * normX.coerceIn(0.05f, 0.95f)
+            val tapY = h * normY.coerceIn(0.05f, 0.95f)
+            val downTime = SystemClock.uptimeMillis()
+            val downEvent = MotionEvent.obtain(
+                downTime,
+                downTime,
+                MotionEvent.ACTION_DOWN,
+                tapX,
+                tapY,
+                0,
+            )
+            view.dispatchTouchEvent(downEvent)
+            downEvent.recycle()
+
+            view.postDelayed(
+                {
+                    val upTime = SystemClock.uptimeMillis()
+                    val upEvent = MotionEvent.obtain(
+                        downTime,
+                        upTime,
+                        MotionEvent.ACTION_UP,
+                        tapX,
+                        tapY,
+                        0,
+                    )
+                    view.dispatchTouchEvent(upEvent)
+                    upEvent.recycle()
+                },
+                60L,
+            )
+        }
+    }
+}
+
+@Keep
+private class PpvEmbedBridge(
+    private val webView: WebView,
+    private val controller: WebEmbedController,
+    private val onBuffering: () -> Unit,
+    private val onPlaying: () -> Unit,
+    private val onPaused: () -> Unit,
+    private val onMutedChanged: (Boolean) -> Unit,
+) {
+    @JavascriptInterface
+    fun onPlayerState(state: String, muted: Boolean) {
+        webView.post {
+            controller.isMutedNow = muted
+            onMutedChanged(muted)
+            when (state) {
+                "playing" -> {
+                    controller.hasReportedTerminalOrReady = true
+                    controller.isPlayingNow = true
+                    controller.userPausedNow = false
+                    onPlaying()
+                }
+                "buffering" -> {
+                    if (!controller.userPausedNow) {
+                        controller.isPlayingNow = false
+                        onBuffering()
+                    }
+                }
+                "paused", "idle" -> {
+                    controller.hasReportedTerminalOrReady = true
+                    controller.isPlayingNow = false
+                    onPaused()
+                }
+            }
+        }
+    }
+
+    @JavascriptInterface
+    fun requestTrustedTap(normX: Float, normY: Float, forceFromUser: Boolean) {
+        webView.post {
+            if (!forceFromUser) {
+                if (controller.isPlayingNow || controller.userPausedNow || controller.autoTapAttempts >= 3) {
+                    return@post
+                }
+                controller.autoTapAttempts += 1
+            }
+            controller.dispatchTrustedTap(normX, normY)
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
 @Composable
 fun EmbeddedWebPlayer(
     embedUrl: String,
     reloadNonce: Int,
+    controller: WebEmbedController,
     onBuffering: () -> Unit,
     onPlaying: () -> Unit,
+    onPaused: () -> Unit,
+    onMutedChanged: (Boolean) -> Unit,
     onError: (title: String, detail: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -89,13 +261,35 @@ fun EmbeddedWebPlayer(
         }
     }
 
-    DisposableEffect(webView, containerLayout) {
+    DisposableEffect(webView, containerLayout, controller) {
         var customFullscreenView: View? = null
         var customCallback: WebChromeClient.CustomViewCallback? = null
         var documentStartScriptHandler: ScriptHandler? = null
+        val defaultPosterBitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(AndroidColor.BLACK)
+        }
+        val fallbackReadyRunnable = Runnable {
+            if (!controller.isPlayingNow && !controller.hasReportedTerminalOrReady) {
+                controller.hasReportedTerminalOrReady = true
+                onPaused()
+            }
+        }
 
         if (webView.parent == null) {
             containerLayout.addView(webView)
+        }
+        controller.attach(webView)
+
+        val bridge = PpvEmbedBridge(
+            webView = webView,
+            controller = controller,
+            onBuffering = onBuffering,
+            onPlaying = onPlaying,
+            onPaused = onPaused,
+            onMutedChanged = onMutedChanged,
+        )
+        runCatching {
+            webView.addJavascriptInterface(bridge, "PpvEmbedBridge")
         }
 
         runCatching {
@@ -109,6 +303,8 @@ fun EmbeddedWebPlayer(
         }
 
         webView.webChromeClient = object : WebChromeClient() {
+            override fun getDefaultVideoPoster(): Bitmap = defaultPosterBitmap
+
             override fun onCreateWindow(
                 view: WebView?,
                 isDialog: Boolean,
@@ -160,12 +356,25 @@ fun EmbeddedWebPlayer(
 
         webView.webViewClient = object : WebViewClient() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                val scheme = request?.url?.scheme?.lowercase() ?: return false
-                // Block intent://, market://, or custom app-launch redirects; keep http/https inside WebView
-                return scheme != "http" && scheme != "https"
+                val uri = request?.url ?: return false
+                val scheme = uri.scheme?.lowercase() ?: return false
+                if (scheme != "http" && scheme != "https") {
+                    return true
+                }
+                // After initial load settles, block non-redirect cross-host main-frame ad hijacks
+                if (controller.pageFinished && request.isForMainFrame && !request.isRedirect) {
+                    val targetHost = uri.host?.lowercase()
+                    val expectedHost = controller.initialHost
+                    if (!expectedHost.isNullOrBlank() && !targetHost.isNullOrBlank() && targetHost != expectedHost) {
+                        return true
+                    }
+                }
+                return false
             }
 
-            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+            override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                webView.removeCallbacks(fallbackReadyRunnable)
+                controller.pageFinished = false
                 onBuffering()
                 if (url != null && url != "about:blank") {
                     view?.evaluateJavascript(EMBED_COMPAT_SCRIPT, null)
@@ -180,9 +389,15 @@ fun EmbeddedWebPlayer(
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 if (url != null && url != "about:blank") {
+                    controller.pageFinished = true
                     view?.evaluateJavascript(EMBED_COMPAT_SCRIPT, null)
+                    view?.evaluateJavascript(
+                        "window.__ppvStartAutoplayWatchdog && window.__ppvStartAutoplayWatchdog();",
+                        null,
+                    )
                     CookieManager.getInstance().flush()
-                    onPlaying()
+                    webView.removeCallbacks(fallbackReadyRunnable)
+                    webView.postDelayed(fallbackReadyRunnable, 5_000L)
                 }
             }
 
@@ -192,6 +407,7 @@ fun EmbeddedWebPlayer(
                 error: WebResourceError?,
             ) {
                 if (request?.isForMainFrame == true) {
+                    webView.removeCallbacks(fallbackReadyRunnable)
                     onError(
                         "Embed Load Error",
                         error?.description?.toString() ?: "Unable to load broadcast embed.",
@@ -205,6 +421,7 @@ fun EmbeddedWebPlayer(
                 errorResponse: WebResourceResponse?,
             ) {
                 if (request?.isForMainFrame == true) {
+                    webView.removeCallbacks(fallbackReadyRunnable)
                     val code = errorResponse?.statusCode ?: 500
                     onError(
                         "Embed Unavailable (HTTP $code)",
@@ -224,7 +441,10 @@ fun EmbeddedWebPlayer(
         lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
         onDispose {
+            webView.removeCallbacks(fallbackReadyRunnable)
             lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+            controller.detach(webView)
+            runCatching { webView.removeJavascriptInterface("PpvEmbedBridge") }
             runCatching { documentStartScriptHandler?.remove() }
             documentStartScriptHandler = null
             customFullscreenView?.let { containerLayout.removeView(it) }
@@ -237,6 +457,9 @@ fun EmbeddedWebPlayer(
             webView.webViewClient = WebViewClient()
             webView.removeAllViews()
             webView.destroy()
+            if (!defaultPosterBitmap.isRecycled) {
+                defaultPosterBitmap.recycle()
+            }
         }
     }
 
@@ -247,6 +470,7 @@ fun EmbeddedWebPlayer(
             val key = "$embedUrl#$reloadNonce"
             if (lastLoadedKey != key) {
                 lastLoadedKey = key
+                controller.resetForLoad(embedUrl)
                 onBuffering()
                 val headers = mapOf("Referer" to "https://ppv.st/")
                 webView.loadUrl(embedUrl, headers)
@@ -256,14 +480,13 @@ fun EmbeddedWebPlayer(
 }
 
 /**
- * Compatibility guard for embedded video hosts running in Android WebView:
- * 1) Embeds such as taifood-blog.asia inject `<object id="sandDetect" data="data:application/pdf;..."
- *    onerror="window.sandDetect()">` to detect sandboxed iframes by probing Chrome's desktop PDF plugin.
- *    Android WebView has no built-in PDF viewer plugin, so `<object data="data:application/pdf">` always
- *    fires `onerror` and triggers `window.sandDetect()`, replacing the page with
- *    "Remove sandbox attributes on the iframe tag". Defining `window.sandDetect` as a non-overwritable
- *    no-op and neutralizing the `<object>` probe before page scripts run prevents this false positive.
- * 2) Strips `sandbox` attributes from any nested `<iframe>` tags created dynamically.
+ * Compatibility & TV autoplay script for embedded video hosts in Android WebView:
+ * 1) Neutralizes `sandDetect` PDF-plugin probes & strips `iframe[sandbox]` so WebView never
+ *    shows "Remove sandbox attributes on the iframe tag".
+ * 2) Suppresses popunder ad windows (`window.open`) that steal focus or intercept clicks.
+ * 3) Hooks `window.jwplayer`, `window.Clappr`, and `<video>` elements to force `autostart: true`,
+ *    monitor real playback state, and escalate to a trusted native tap / muted autoplay fallback
+ *    when the embed stalls on a black screen with a white play button.
  */
 private const val EMBED_COMPAT_SCRIPT = """
 (function() {
@@ -286,6 +509,10 @@ private const val EMBED_COMPAT_SCRIPT = """
   cleanDom(document);
   if (window.__ppvEmbedGuardInstalled) return;
   window.__ppvEmbedGuardInstalled = true;
+  window.__ppvUserPaused = false;
+  window.__ppvMutedForAutoplay = false;
+  window.__ppvUnmuteAttempted = false;
+  window.__ppvHasStarted = false;
 
   var noop = function() {};
   try {
@@ -295,6 +522,10 @@ private const val EMBED_COMPAT_SCRIPT = """
       get: function() { return noop; },
       set: function() {}
     });
+  } catch (e) {}
+
+  try {
+    window.open = function() { return null; };
   } catch (e) {}
 
   try {
@@ -327,12 +558,439 @@ private const val EMBED_COMPAT_SCRIPT = """
     }
   } catch (e) {}
 
+  function getAnyVideo() {
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      return vids[i];
+    }
+    return null;
+  }
+
+  function isVideoPlaying() {
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      var v = vids[i];
+      if (!v.paused && !v.ended && v.readyState >= 2) {
+        return true;
+      }
+    }
+    var jw = getJwInstance();
+    if (jw && typeof jw.getState === 'function') {
+      try {
+        if (jw.getState() === 'playing') return true;
+      } catch (e) {}
+    }
+    return false;
+  }
+
+  function getCurrentMuted() {
+    var jw = getJwInstance();
+    if (jw && typeof jw.getMute === 'function') {
+      try { return !!jw.getMute(); } catch (e) {}
+    }
+    var v = getAnyVideo();
+    if (v) return !!v.muted;
+    return false;
+  }
+
+  var lastReportedState = '';
+  var lastReportedMute = null;
+  function reportState(state, muted) {
+    var m = (typeof muted === 'boolean') ? muted : getCurrentMuted();
+    var s = state || (isVideoPlaying() ? 'playing' : 'paused');
+    if (s === lastReportedState && m === lastReportedMute) return;
+    lastReportedState = s;
+    lastReportedMute = m;
+    if (window.PpvEmbedBridge && typeof window.PpvEmbedBridge.onPlayerState === 'function') {
+      try { window.PpvEmbedBridge.onPlayerState(s, !!m); } catch (e) {}
+    }
+  }
+
+  function findPlayButtonCoords() {
+    var selectors = [
+      '.jw-display-icon-container',
+      '.jw-icon-display',
+      '.jw-display-icon-display',
+      '.player-poster',
+      '.plyr__control--overlaid',
+      'button[aria-label*="Play" i]',
+      '.vjs-big-play-button'
+    ];
+    for (var i = 0; i < selectors.length; i++) {
+      var el = document.querySelector(selectors[i]);
+      if (el && typeof el.getBoundingClientRect === 'function') {
+        var r = el.getBoundingClientRect();
+        if (r.width > 4 && r.height > 4 && window.innerWidth > 0 && window.innerHeight > 0) {
+          return {
+            x: (r.left + r.width * 0.5) / window.innerWidth,
+            y: (r.top + r.height * 0.5) / window.innerHeight,
+            el: el
+          };
+        }
+      }
+    }
+    return { x: 0.5, y: 0.5, el: null };
+  }
+
+  function getJwInstance() {
+    if (window.__ppvLastJw) return window.__ppvLastJw;
+    if (typeof window.__ppvRawJw === 'function') {
+      try {
+        var inst = window.__ppvRawJw('player') || window.__ppvRawJw();
+        if (inst && typeof inst.getState === 'function') {
+          window.__ppvLastJw = inst;
+          return inst;
+        }
+      } catch (e) {}
+    }
+    if (typeof window.jwplayer === 'function') {
+      try {
+        var inst2 = window.jwplayer('player') || window.jwplayer();
+        if (inst2 && typeof inst2.getState === 'function') {
+          window.__ppvLastJw = inst2;
+          return inst2;
+        }
+      } catch (e) {}
+    }
+    return null;
+  }
+
+  function watchVideoElement(v) {
+    if (!v || v.__ppvWatched) return;
+    v.__ppvWatched = true;
+    try {
+      v.playsInline = true;
+      v.autoplay = true;
+      v.setAttribute('playsinline', '');
+      v.setAttribute('autoplay', '');
+    } catch (e) {}
+
+    v.addEventListener('playing', function() {
+      window.__ppvHasStarted = true;
+      reportState('playing', !!v.muted);
+    });
+    v.addEventListener('pause', function() {
+      if (window.__ppvUserPaused) {
+        reportState('paused', !!v.muted);
+      }
+    });
+    v.addEventListener('waiting', function() {
+      if (!window.__ppvUserPaused && !isVideoPlaying()) {
+        reportState('buffering', !!v.muted);
+      }
+    });
+    v.addEventListener('volumechange', function() {
+      reportState(isVideoPlaying() ? 'playing' : lastReportedState || 'paused', !!v.muted);
+    });
+    v.addEventListener('canplay', function() {
+      if (!window.__ppvUserPaused && v.paused) {
+        try {
+          var p = v.play();
+          if (p && typeof p.catch === 'function') p.catch(function() {});
+        } catch (e) {}
+      }
+    });
+  }
+
+  function scanVideos() {
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      watchVideoElement(vids[i]);
+    }
+  }
+
+  function tryAutoUnmute(inst) {
+    if (!window.__ppvMutedForAutoplay || window.__ppvUnmuteAttempted) return;
+    window.__ppvUnmuteAttempted = true;
+    setTimeout(function() {
+      try {
+        if (inst && typeof inst.setMute === 'function') inst.setMute(false);
+        var vids = document.querySelectorAll('video');
+        for (var i = 0; i < vids.length; i++) vids[i].muted = false;
+        setTimeout(function() {
+          if (!isVideoPlaying() && !window.__ppvUserPaused) {
+            // Re-mute if unmuting triggered autoplay pause policy
+            if (inst && typeof inst.setMute === 'function') inst.setMute(true);
+            for (var j = 0; j < vids.length; j++) vids[j].muted = true;
+            try { if (inst && typeof inst.play === 'function') inst.play(); } catch (e) {}
+            for (var k = 0; k < vids.length; k++) {
+              try { vids[k].play(); } catch (e) {}
+            }
+            reportState(isVideoPlaying() ? 'playing' : 'paused', true);
+          } else {
+            window.__ppvMutedForAutoplay = false;
+            reportState('playing', false);
+          }
+        }, 350);
+      } catch (e) {}
+    }, 500);
+  }
+
+  function attachJwEvents(inst) {
+    if (!inst || inst.__ppvEventsAttached || typeof inst.on !== 'function') return;
+    inst.__ppvEventsAttached = true;
+    window.__ppvLastJw = inst;
+
+    inst.on('ready', function() {
+      scanVideos();
+      if (!window.__ppvUserPaused) {
+        try { inst.play(); } catch (e) {}
+        setTimeout(function() { ensurePlaying(false, false); }, 400);
+      }
+    });
+    inst.on('autostartNotAllowed', function() {
+      if (!window.__ppvUserPaused) {
+        ensurePlaying(true, false);
+      }
+    });
+    inst.on('play', function() {
+      window.__ppvHasStarted = true;
+      reportState('playing', getCurrentMuted());
+      tryAutoUnmute(inst);
+    });
+    inst.on('firstFrame', function() {
+      window.__ppvHasStarted = true;
+      reportState('playing', getCurrentMuted());
+      tryAutoUnmute(inst);
+    });
+    inst.on('buffer', function() {
+      if (!window.__ppvUserPaused && !isVideoPlaying()) {
+        reportState('buffering', getCurrentMuted());
+      }
+    });
+    inst.on('pause', function() {
+      if (window.__ppvUserPaused) {
+        reportState('paused', getCurrentMuted());
+      }
+    });
+    inst.on('idle', function() {
+      if (window.__ppvHasStarted || window.__ppvUserPaused) {
+        reportState('idle', getCurrentMuted());
+      }
+    });
+    inst.on('mute', function(ev) {
+      reportState(isVideoPlaying() ? 'playing' : (lastReportedState || 'paused'), !!(ev && ev.mute));
+    });
+  }
+
+  function wrapJwInstance(inst) {
+    if (!inst || typeof inst !== 'object') return inst;
+    window.__ppvLastJw = inst;
+    if (inst.__ppvWrapped) return inst;
+    inst.__ppvWrapped = true;
+
+    if (typeof inst.setup === 'function') {
+      var origSetup = inst.setup;
+      inst.setup = function(cfg) {
+        if (cfg && typeof cfg === 'object') {
+          if (!window.__ppvUserPaused) {
+            cfg.autostart = true;
+          }
+          if (cfg.mute === undefined) cfg.mute = false;
+          if (cfg.autoPause && typeof cfg.autoPause === 'object') {
+            cfg.autoPause.viewability = false;
+          }
+        }
+        var res = origSetup.apply(this, arguments);
+        attachJwEvents(res || this);
+        window.__ppvStartAutoplayWatchdog && window.__ppvStartAutoplayWatchdog();
+        return res;
+      };
+    }
+    attachJwEvents(inst);
+    return inst;
+  }
+
+  function wrapJwFactory(fn) {
+    if (typeof fn !== 'function') return fn;
+    window.__ppvRawJw = fn;
+    if (fn.__ppvFactoryWrapped) return fn;
+    try {
+      var proxied = new Proxy(fn, {
+        apply: function(target, thisArg, args) {
+          var inst = Reflect.apply(target, thisArg, args);
+          return wrapJwInstance(inst);
+        }
+      });
+      proxied.__ppvFactoryWrapped = true;
+      return proxied;
+    } catch (e) {
+      var fallback = function() {
+        var inst = fn.apply(this, arguments);
+        return wrapJwInstance(inst);
+      };
+      fallback.__ppvFactoryWrapped = true;
+      return fallback;
+    }
+  }
+
+  if (!window.__ppvJwHooked) {
+    window.__ppvJwHooked = true;
+    var currentJw = typeof window.jwplayer === 'function' ? wrapJwFactory(window.jwplayer) : window.jwplayer;
+    try {
+      Object.defineProperty(window, 'jwplayer', {
+        configurable: true,
+        enumerable: true,
+        get: function() { return currentJw; },
+        set: function(val) {
+          currentJw = wrapJwFactory(val);
+        }
+      });
+    } catch (e) {}
+  }
+
+  function ensurePlaying(allowTap, allowMute) {
+    if (window.__ppvUserPaused) return;
+    scanVideos();
+    if (isVideoPlaying()) {
+      reportState('playing', getCurrentMuted());
+      return;
+    }
+    var jw = getJwInstance();
+    if (jw) {
+      attachJwEvents(jw);
+      var st = '';
+      try { st = jw.getState(); } catch (e) {}
+      if (st === 'playing') {
+        reportState('playing', getCurrentMuted());
+        return;
+      }
+      if (allowMute && typeof jw.setMute === 'function') {
+        window.__ppvMutedForAutoplay = true;
+        try { jw.setMute(true); } catch (e) {}
+      }
+      if (typeof jw.play === 'function') {
+        try { jw.play(); } catch (e) {}
+      }
+    }
+
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      var v = vids[i];
+      if (v.paused && (v.currentSrc || v.src || v.srcObject || v.readyState >= 1)) {
+        if (allowMute) {
+          window.__ppvMutedForAutoplay = true;
+          v.muted = true;
+        }
+        try {
+          var pr = v.play();
+          if (pr && typeof pr.catch === 'function') {
+            pr.catch(function() {});
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (allowTap && !isVideoPlaying()) {
+      var target = findPlayButtonCoords();
+      if (target.el && typeof target.el.click === 'function') {
+        try { target.el.click(); } catch (e) {}
+      }
+      if (window.PpvEmbedBridge && typeof window.PpvEmbedBridge.requestTrustedTap === 'function') {
+        try { window.PpvEmbedBridge.requestTrustedTap(target.x, target.y, false); } catch (e) {}
+      }
+    }
+  }
+
+  var watchdogTimer = null;
+  window.__ppvStartAutoplayWatchdog = function() {
+    if (watchdogTimer) {
+      clearInterval(watchdogTimer);
+      watchdogTimer = null;
+    }
+    var ticks = 0;
+    watchdogTimer = setInterval(function() {
+      ticks += 1;
+      scanVideos();
+      if (window.__ppvUserPaused) {
+        clearInterval(watchdogTimer);
+        watchdogTimer = null;
+        return;
+      }
+      if (isVideoPlaying()) {
+        reportState('playing', getCurrentMuted());
+        clearInterval(watchdogTimer);
+        watchdogTimer = null;
+        return;
+      }
+      if (ticks === 1 || ticks === 2) {
+        ensurePlaying(false, false);
+      } else if (ticks === 3 || ticks === 5) {
+        ensurePlaying(true, false);
+      } else if (ticks === 7) {
+        ensurePlaying(true, true);
+      } else if (ticks >= 10) {
+        if (!isVideoPlaying()) {
+          reportState('paused', getCurrentMuted());
+        }
+        clearInterval(watchdogTimer);
+        watchdogTimer = null;
+      }
+    }, 600);
+  };
+
+  window.__ppvUserActionPlay = function() {
+    window.__ppvUserPaused = false;
+    scanVideos();
+    var jw = getJwInstance();
+    if (jw && typeof jw.play === 'function') {
+      try { jw.play(); } catch (e) {}
+    }
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      try {
+        var pr = vids[i].play();
+        if (pr && typeof pr.catch === 'function') pr.catch(function() {});
+      } catch (e) {}
+    }
+    setTimeout(function() {
+      if (!isVideoPlaying() && !window.__ppvUserPaused) {
+        var target = findPlayButtonCoords();
+        if (target.el && typeof target.el.click === 'function') {
+          try { target.el.click(); } catch (e) {}
+        }
+        if (window.PpvEmbedBridge && typeof window.PpvEmbedBridge.requestTrustedTap === 'function') {
+          try { window.PpvEmbedBridge.requestTrustedTap(target.x, target.y, true); } catch (e) {}
+        }
+      }
+    }, 120);
+  };
+
+  window.__ppvUserActionPause = function() {
+    window.__ppvUserPaused = true;
+    var jw = getJwInstance();
+    if (jw && typeof jw.pause === 'function') {
+      try { jw.pause(); } catch (e) {}
+    }
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      try { vids[i].pause(); } catch (e) {}
+    }
+    reportState('paused', getCurrentMuted());
+  };
+
+  window.__ppvUserActionToggleMute = function() {
+    var nextMuted = !getCurrentMuted();
+    window.__ppvMutedForAutoplay = false;
+    var jw = getJwInstance();
+    if (jw && typeof jw.setMute === 'function') {
+      try { jw.setMute(nextMuted); } catch (e) {}
+    }
+    var vids = document.querySelectorAll('video');
+    for (var i = 0; i < vids.length; i++) {
+      try { vids[i].muted = nextMuted; } catch (e) {}
+    }
+    reportState(isVideoPlaying() ? 'playing' : (lastReportedState || 'paused'), nextMuted);
+  };
+
   function attachObserver() {
     if (window.__ppvSandboxObserver || !document.documentElement || typeof MutationObserver === 'undefined') {
       return;
     }
     cleanDom(document);
+    scanVideos();
     window.__ppvSandboxObserver = new MutationObserver(function(mutations) {
+      var foundVideo = false;
       for (var m = 0; m < mutations.length; m++) {
         var nodes = mutations[m].addedNodes;
         for (var n = 0; n < nodes.length; n++) {
@@ -341,14 +999,30 @@ private const val EMBED_COMPAT_SCRIPT = """
             if (node.tagName === 'IFRAME' && node.hasAttribute('sandbox')) {
               node.removeAttribute('sandbox');
             }
+            if (node.tagName === 'VIDEO') {
+              foundVideo = true;
+              watchVideoElement(node);
+            }
             if (node.tagName === 'OBJECT' && (node.id === 'sandDetect' || (node.getAttribute('data') || '').indexOf('application/pdf') !== -1)) {
               node.removeAttribute('onerror');
               if (node.parentNode) { node.parentNode.removeChild(node); }
             } else {
               cleanDom(node);
+              if (node.querySelectorAll) {
+                var innerVids = node.querySelectorAll('video');
+                if (innerVids.length > 0) {
+                  foundVideo = true;
+                  for (var k = 0; k < innerVids.length; k++) {
+                    watchVideoElement(innerVids[k]);
+                  }
+                }
+              }
             }
           }
         }
+      }
+      if (foundVideo && !window.__ppvUserPaused) {
+        ensurePlaying(false, false);
       }
     });
     window.__ppvSandboxObserver.observe(document.documentElement, { childList: true, subtree: true });

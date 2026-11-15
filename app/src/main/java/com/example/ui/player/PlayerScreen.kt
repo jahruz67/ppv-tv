@@ -24,6 +24,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Pause
@@ -86,6 +88,7 @@ fun PlayerScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var exoPlayerRef by remember { mutableStateOf<ExoPlayer?>(null) }
     var selectedAudioTrack by remember { mutableStateOf<AudioTrackOption?>(null) }
+    val webEmbedController = remember { WebEmbedController() }
 
     val retryFocusRequester = remember { FocusRequester() }
     val menuPillFocusRequester = remember { FocusRequester() }
@@ -129,20 +132,57 @@ fun PlayerScreen(
                         viewModel.toggleControls()
                         true
                     }
-                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
                         val player = exoPlayerRef
-                        if (player != null) {
-                            if (player.isPlaying) {
-                                player.pause()
-                                viewModel.onPaused()
-                            } else {
+                        when {
+                            player != null -> {
+                                if (player.isPlaying) {
+                                    player.pause()
+                                    viewModel.onPaused()
+                                } else {
+                                    player.play()
+                                    viewModel.onPlaying()
+                                }
+                                true
+                            }
+                            activeSource?.playbackMode == PlaybackMode.WEB_EMBED -> {
+                                webEmbedController.togglePlayPause()
+                                true
+                            }
+                            else -> {
+                                viewModel.toggleControls()
+                                true
+                            }
+                        }
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                        val player = exoPlayerRef
+                        when {
+                            player != null -> {
                                 player.play()
                                 viewModel.onPlaying()
+                                true
                             }
-                            true
-                        } else {
-                            viewModel.toggleControls()
-                            true
+                            activeSource?.playbackMode == PlaybackMode.WEB_EMBED -> {
+                                webEmbedController.play()
+                                true
+                            }
+                            else -> false
+                        }
+                    }
+                    KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                        val player = exoPlayerRef
+                        when {
+                            player != null -> {
+                                player.pause()
+                                viewModel.onPaused()
+                                true
+                            }
+                            activeSource?.playbackMode == PlaybackMode.WEB_EMBED -> {
+                                webEmbedController.pause()
+                                true
+                            }
+                            else -> false
                         }
                     }
                     KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
@@ -186,8 +226,11 @@ fun PlayerScreen(
                     EmbeddedWebPlayer(
                         embedUrl = activeSource.url,
                         reloadNonce = state.reloadNonce,
+                        controller = webEmbedController,
                         onBuffering = viewModel::onBuffering,
                         onPlaying = viewModel::onPlaying,
+                        onPaused = viewModel::onPaused,
+                        onMutedChanged = viewModel::onMutedChanged,
                         onError = viewModel::onError,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -408,30 +451,61 @@ fun PlayerScreen(
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    if (activeSource?.playbackMode == PlaybackMode.NATIVE_MEDIA3 && exoPlayerRef != null) {
+                    val hasNativePlayPause = activeSource?.playbackMode == PlaybackMode.NATIVE_MEDIA3 && exoPlayerRef != null
+                    val hasWebPlayPause = activeSource?.playbackMode == PlaybackMode.WEB_EMBED
+                    val hasPlayPauseButton = hasNativePlayPause || hasWebPlayPause
+
+                    if (hasPlayPauseButton) {
+                        val isPlaying = state.playbackStatus is PlaybackStatus.Playing
                         Button(
                             onClick = {
-                                val player = exoPlayerRef ?: return@Button
-                                if (player.isPlaying) {
-                                    player.pause()
-                                    viewModel.onPaused()
+                                if (hasNativePlayPause) {
+                                    val player = exoPlayerRef ?: return@Button
+                                    if (player.isPlaying) {
+                                        player.pause()
+                                        viewModel.onPaused()
+                                    } else {
+                                        player.play()
+                                        viewModel.onPlaying()
+                                    }
                                 } else {
-                                    player.play()
-                                    viewModel.onPlaying()
+                                    if (isPlaying) {
+                                        webEmbedController.pause()
+                                    } else {
+                                        webEmbedController.play()
+                                    }
                                 }
                             },
                             modifier = Modifier
                                 .focusRequester(primaryOverlayFocus)
                                 .testTag("player_play_pause_button"),
                         ) {
-                            val isPaused = state.playbackStatus is PlaybackStatus.Paused
                             Icon(
-                                imageVector = if (isPaused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
-                                contentDescription = if (isPaused) "Play" else "Pause",
+                                imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                contentDescription = if (isPlaying) "Pause" else "Play",
                                 modifier = Modifier.size(18.dp),
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (isPaused) "Resume" else "Pause")
+                            Text(if (isPlaying) "Pause" else "Play")
+                        }
+                    }
+
+                    if (hasWebPlayPause) {
+                        OutlinedButton(
+                            onClick = { webEmbedController.toggleMute() },
+                            modifier = Modifier.testTag("player_mute_button"),
+                        ) {
+                            Icon(
+                                imageVector = if (state.isMuted) {
+                                    Icons.AutoMirrored.Filled.VolumeOff
+                                } else {
+                                    Icons.AutoMirrored.Filled.VolumeUp
+                                },
+                                contentDescription = if (state.isMuted) "Unmute" else "Mute",
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(if (state.isMuted) "Unmute" else "Mute")
                         }
                     }
 
@@ -439,7 +513,7 @@ fun PlayerScreen(
                         onClick = { viewModel.retry() },
                         modifier = Modifier
                             .let {
-                                if (activeSource?.playbackMode != PlaybackMode.NATIVE_MEDIA3) {
+                                if (!hasPlayPauseButton) {
                                     it.focusRequester(primaryOverlayFocus)
                                 } else {
                                     it

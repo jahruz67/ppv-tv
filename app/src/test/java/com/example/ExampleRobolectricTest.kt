@@ -264,4 +264,54 @@ class ExampleRobolectricTest {
         composeTestRule.waitForIdle()
         assertTrue(exited)
     }
+
+    @Test
+    fun `player screen exposes play and mute controls for web embed streams`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val prefs = UserPreferencesDataStore(context)
+        val playerVm = PlayerViewModel(prefs)
+        val event = SportEvent(
+            id = 777,
+            title = "NFL Network",
+            leagueTag = "24/7",
+            categoryId = 14,
+            categoryName = "24/7 Streams",
+            posterUrl = null,
+            accentColors = emptyList(),
+            uriName = "nfl-network",
+            startsAtEpochSec = null,
+            endsAtEpochSec = null,
+            alwaysLive = true,
+            status = EventStatus.ALWAYS_LIVE,
+            viewers = 100,
+            sources = listOf(
+                StreamSource(
+                    id = "s_embed",
+                    label = "HD | NFL Network",
+                    broadcaster = "NFL Network",
+                    quality = "HD",
+                    language = "EN",
+                    tag = "24/7",
+                    url = "https://taifood-blog.asia/embed/nfl-network",
+                    playbackMode = PlaybackMode.WEB_EMBED,
+                    isPrimary = true,
+                ),
+            ),
+        )
+        playerVm.initialize(event, 0)
+
+        composeTestRule.setContent {
+            PpvTvTheme {
+                PlayerScreen(
+                    viewModel = playerVm,
+                    onBackToEvent = {},
+                )
+            }
+        }
+        composeTestRule.waitForIdle()
+
+        composeTestRule.onNodeWithTag("player_play_pause_button").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("player_play_pause_button").assertIsFocused()
+        composeTestRule.onNodeWithTag("player_mute_button").assertIsDisplayed()
+    }
 }

@@ -41,6 +41,7 @@ data class PlayerUiState(
     val audioTracks: List<AudioTrackOption> = emptyList(),
     val reloadNonce: Int = 0,
     val userPaused: Boolean = false,
+    val isMuted: Boolean = false,
 ) {
     val activeSource: StreamSource?
         get() = event?.sources?.getOrNull(selectedSourceIndex)
@@ -76,6 +77,7 @@ class PlayerViewModel(
             selectedSourceIndex = safeIndex,
             playbackStatus = initialStatus,
             controlsVisible = true,
+            isMuted = false,
         )
         scheduleAutoHide()
     }
@@ -96,6 +98,7 @@ class PlayerViewModel(
                 audioSelectorVisible = false,
                 audioTracks = emptyList(),
                 userPaused = false,
+                isMuted = false,
                 reloadNonce = state.reloadNonce + 1,
                 controlsVisible = true,
             )
@@ -109,6 +112,8 @@ class PlayerViewModel(
         _uiState.update { state ->
             state.copy(
                 playbackStatus = PlaybackStatus.Preparing,
+                userPaused = false,
+                isMuted = false,
                 reloadNonce = state.reloadNonce + 1,
                 controlsVisible = true,
             )
@@ -146,6 +151,10 @@ class PlayerViewModel(
                 controlsVisible = true,
             )
         }
+    }
+
+    fun onMutedChanged(muted: Boolean) {
+        _uiState.update { it.copy(isMuted = muted) }
     }
 
     fun updateAudioTracks(tracks: List<AudioTrackOption>) {
