@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.graphics.Color as AndroidColor
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -59,17 +60,26 @@ fun EmbeddedWebPlayer(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT,
             )
+            val targetWebView = this
+            CookieManager.getInstance().apply {
+                setAcceptCookie(true)
+                setAcceptThirdPartyCookies(targetWebView, true)
+            }
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
+                databaseEnabled = true
+                allowContentAccess = true
+                javaScriptCanOpenWindowsAutomatically = true
+                setSupportMultipleWindows(false)
                 mediaPlaybackRequiresUserGesture = false
                 useWideViewPort = true
                 loadWithOverviewMode = true
                 builtInZoomControls = false
                 displayZoomControls = false
-                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                 userAgentString =
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             }
         }
     }
@@ -111,12 +121,20 @@ fun EmbeddedWebPlayer(
         }
 
         webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val scheme = request?.url?.scheme?.lowercase() ?: return false
+                // Block intent://, market://, or custom app-launch redirects; keep http/https inside WebView
+                return scheme != "http" && scheme != "https"
+            }
+
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 onBuffering()
             }
 
             override fun onPageFinished(view: WebView?, url: String?) {
                 if (url != null && url != "about:blank") {
+                    view?.evaluateJavascript(STRIP_SANDBOX_SCRIPT, null)
+                    CookieManager.getInstance().flush()
                     onPlaying()
                 }
             }
@@ -187,3 +205,35 @@ fun EmbeddedWebPlayer(
         },
     )
 }
+
+private const val STRIP_SANDBOX_SCRIPT = """
+(function() {
+  function cleanIframes(root) {
+    if (!root || !root.querySelectorAll) return;
+    var frames = root.querySelectorAll('iframe[sandbox]');
+    for (var i = 0; i < frames.length; i++) {
+      var f = frames[i];
+      f.removeAttribute('sandbox');
+      if (f.src) { f.src = f.src; }
+    }
+  }
+  cleanIframes(document);
+  if (!window.__ppvSandboxObserver && document.documentElement && typeof MutationObserver !== 'undefined') {
+    window.__ppvSandboxObserver = new MutationObserver(function(mutations) {
+      for (var m = 0; m < mutations.length; m++) {
+        var nodes = mutations[m].addedNodes;
+        for (var n = 0; n < nodes.length; n++) {
+          var node = nodes[n];
+          if (node && node.nodeType === 1) {
+            if (node.tagName === 'IFRAME' && node.hasAttribute('sandbox')) {
+              node.removeAttribute('sandbox');
+            }
+            cleanIframes(node);
+          }
+        }
+      }
+    });
+    window.__ppvSandboxObserver.observe(document.documentElement, { childList: true, subtree: true });
+  }
+})();
+"""
