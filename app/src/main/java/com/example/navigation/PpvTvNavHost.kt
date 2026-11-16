@@ -1,6 +1,9 @@
 package com.example.navigation
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -49,9 +52,6 @@ fun PpvTvNavHost(
     )
     val catalogState by homeViewModel.uiState.collectAsStateWithLifecycle()
     val selectedCategoryId by homeViewModel.selectedCategoryId.collectAsStateWithLifecycle()
-    val searchQuery by homeViewModel.searchQuery.collectAsStateWithLifecycle()
-    val searchResults by homeViewModel.searchResults.collectAsStateWithLifecycle()
-    val recentSearches by homeViewModel.recentSearches.collectAsStateWithLifecycle()
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -74,6 +74,10 @@ fun PpvTvNavHost(
     NavHost(
         navController = navController,
         startDestination = AppDestination.Browse,
+        enterTransition = { fadeIn(tween(120)) },
+        exitTransition = { fadeOut(tween(120)) },
+        popEnterTransition = { fadeIn(tween(120)) },
+        popExitTransition = { fadeOut(tween(120)) },
         modifier = modifier
             .fillMaxSize()
             .background(TvBackground),
@@ -151,6 +155,9 @@ fun PpvTvNavHost(
                     }
 
                     TopNavTab.SEARCH -> {
+                        val searchQuery by homeViewModel.searchQuery.collectAsStateWithLifecycle()
+                        val searchResults by homeViewModel.searchResults.collectAsStateWithLifecycle()
+                        val recentSearches by homeViewModel.recentSearches.collectAsStateWithLifecycle()
                         val ready = catalogState as? CatalogUiState.Ready
                         val quickTags = ready?.categories
                             ?.map { it.name }

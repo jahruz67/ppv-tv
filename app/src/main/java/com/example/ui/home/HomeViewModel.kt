@@ -12,12 +12,15 @@ import com.example.domain.usecase.EventCatalogMapper
 import com.example.domain.usecase.SearchEventsUseCase
 import com.example.preferences.FavoriteEventSnapshot
 import com.example.preferences.UserPreferencesDataStore
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -56,20 +59,9 @@ class HomeViewModel(
     val recentSearches: StateFlow<List<String>> = preferences.recentSearchesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val uiState: StateFlow<CatalogUiState> = combine(
-        snapshotFlow,
-        refreshingFlow,
-        errorFlow,
-        preferences.favoriteIdsFlow,
-        preferences.favoriteSnapshotsFlow,
-    ) { snapshot, isRefreshing, errorMsg, favIds, favSnapshots ->
-        if (snapshot == null) {
-            if (errorMsg != null) {
-                CatalogUiState.Error(errorMsg)
-            } else {
-                CatalogUiState.Loading
-            }
-        } else {
+    // Rebuild catalog sections only when the schedule changes, away from UI work.
+    private val catalogContentFlow = snapshotFlow.map { snapshot ->
+        snapshot?.let {
             val all = snapshot.allEvents
             val liveEvents = all.filter { it.status == EventStatus.LIVE }
                 .sortedWith(EventCatalogMapper.eventComparator)
@@ -88,11 +80,25 @@ class HomeViewModel(
                 upcomingEvents = upcomingEvents,
                 alwaysLiveChannels = channels,
                 categories = snapshot.categories,
-                favoriteIds = favIds,
-                favoriteSnapshots = favSnapshots,
-                isRefreshing = isRefreshing,
+                favoriteIds = emptySet(),
+                favoriteSnapshots = emptyList(),
+                isRefreshing = false,
             )
         }
+    }.flowOn(Dispatchers.Default)
+
+    val uiState: StateFlow<CatalogUiState> = combine(
+        catalogContentFlow,
+        refreshingFlow,
+        errorFlow,
+        preferences.favoriteIdsFlow,
+        preferences.favoriteSnapshotsFlow,
+    ) { catalog, isRefreshing, errorMsg, favIds, favSnapshots ->
+        catalog?.copy(
+            favoriteIds = favIds,
+            favoriteSnapshots = favSnapshots,
+            isRefreshing = isRefreshing,
+        ) ?: errorMsg?.let { CatalogUiState.Error(it) } ?: CatalogUiState.Loading
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CatalogUiState.Loading)
 
     val searchResults: StateFlow<List<SportEvent>> = combine(
@@ -101,7 +107,8 @@ class HomeViewModel(
     ) { snapshot, query ->
         val events = snapshot?.allEvents.orEmpty()
         SearchEventsUseCase.search(events, query)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     init {
         loadCatalog(forceRefresh = false)

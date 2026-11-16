@@ -42,9 +42,9 @@ import androidx.webkit.WebViewFeature
 class WebEmbedController {
     private var webView: WebView? = null
     internal var isPlayingNow: Boolean = false
+    internal var isBufferingNow: Boolean = false
     internal var isMutedNow: Boolean = false
     internal var userPausedNow: Boolean = false
-    internal var hasReportedTerminalOrReady: Boolean = false
     internal var autoTapAttempts: Int = 0
     internal var initialHost: String? = null
     internal var pageFinished: Boolean = false
@@ -52,6 +52,8 @@ class WebEmbedController {
     internal fun attach(view: WebView) {
         webView = view
     }
+
+    internal fun isAttachedTo(view: WebView): Boolean = webView === view
 
     internal fun detach(view: WebView) {
         if (webView === view) {
@@ -61,9 +63,9 @@ class WebEmbedController {
 
     internal fun resetForLoad(embedUrl: String) {
         isPlayingNow = false
+        isBufferingNow = false
         isMutedNow = false
         userPausedNow = false
-        hasReportedTerminalOrReady = false
         autoTapAttempts = 0
         pageFinished = false
         initialHost = runCatching { Uri.parse(embedUrl).host?.lowercase() }.getOrNull()
@@ -73,6 +75,7 @@ class WebEmbedController {
         userPausedNow = false
         val view = webView ?: return
         view.post {
+            if (!isAttachedTo(view)) return@post
             view.evaluateJavascript(
                 "window.__ppvUserActionPlay && window.__ppvUserActionPlay();",
                 null,
@@ -83,8 +86,10 @@ class WebEmbedController {
     fun pause() {
         userPausedNow = true
         isPlayingNow = false
+        isBufferingNow = false
         val view = webView ?: return
         view.post {
+            if (!isAttachedTo(view)) return@post
             view.evaluateJavascript(
                 "window.__ppvUserActionPause && window.__ppvUserActionPause();",
                 null,
@@ -93,7 +98,7 @@ class WebEmbedController {
     }
 
     fun togglePlayPause() {
-        if (isPlayingNow) {
+        if (!userPausedNow) {
             pause()
         } else {
             play()
@@ -103,6 +108,7 @@ class WebEmbedController {
     fun toggleMute() {
         val view = webView ?: return
         view.post {
+            if (!isAttachedTo(view)) return@post
             view.evaluateJavascript(
                 "window.__ppvUserActionToggleMute && window.__ppvUserActionToggleMute();",
                 null,
@@ -113,6 +119,7 @@ class WebEmbedController {
     internal fun dispatchTrustedTap(normX: Float, normY: Float) {
         val view = webView ?: return
         view.post {
+            if (!isAttachedTo(view)) return@post
             val w = view.width
             val h = view.height
             if (w <= 0 || h <= 0) return@post
@@ -132,6 +139,7 @@ class WebEmbedController {
 
             view.postDelayed(
                 {
+                    if (!isAttachedTo(view)) return@postDelayed
                     val upTime = SystemClock.uptimeMillis()
                     val upEvent = MotionEvent.obtain(
                         downTime,
@@ -162,24 +170,28 @@ private class PpvEmbedBridge(
     @JavascriptInterface
     fun onPlayerState(state: String, muted: Boolean) {
         webView.post {
+            if (!controller.isAttachedTo(webView)) return@post
             controller.isMutedNow = muted
             onMutedChanged(muted)
             when (state) {
                 "playing" -> {
-                    controller.hasReportedTerminalOrReady = true
+                    if (controller.userPausedNow) return@post
                     controller.isPlayingNow = true
+                    controller.isBufferingNow = false
                     controller.userPausedNow = false
                     onPlaying()
                 }
                 "buffering" -> {
-                    if (!controller.hasReportedTerminalOrReady && !controller.userPausedNow) {
+                    if (!controller.userPausedNow) {
                         controller.isPlayingNow = false
+                        controller.isBufferingNow = true
                         onBuffering()
                     }
                 }
                 "paused", "idle" -> {
-                    controller.hasReportedTerminalOrReady = true
                     controller.isPlayingNow = false
+                    controller.isBufferingNow = false
+                    controller.userPausedNow = true
                     onPaused()
                 }
             }
@@ -189,8 +201,11 @@ private class PpvEmbedBridge(
     @JavascriptInterface
     fun requestTrustedTap(normX: Float, normY: Float, forceFromUser: Boolean) {
         webView.post {
+            if (!controller.isAttachedTo(webView)) return@post
             if (!forceFromUser) {
-                if (controller.isPlayingNow || controller.userPausedNow || controller.autoTapAttempts >= 3) {
+                if (controller.isPlayingNow || controller.isBufferingNow ||
+                    controller.userPausedNow || controller.autoTapAttempts >= 3
+                ) {
                     return@post
                 }
                 controller.autoTapAttempts += 1
@@ -267,12 +282,6 @@ fun EmbeddedWebPlayer(
         var documentStartScriptHandler: ScriptHandler? = null
         val defaultPosterBitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply {
             eraseColor(AndroidColor.BLACK)
-        }
-        val fallbackReadyRunnable = Runnable {
-            if (!controller.isPlayingNow && !controller.hasReportedTerminalOrReady) {
-                controller.hasReportedTerminalOrReady = true
-                onPaused()
-            }
         }
 
         if (webView.parent == null) {
@@ -373,7 +382,6 @@ fun EmbeddedWebPlayer(
             }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                webView.removeCallbacks(fallbackReadyRunnable)
                 controller.pageFinished = false
                 if (url != null && url != "about:blank") {
                     view?.evaluateJavascript(EMBED_COMPAT_SCRIPT, null)
@@ -394,9 +402,6 @@ fun EmbeddedWebPlayer(
                         "window.__ppvStartAutoplayWatchdog && window.__ppvStartAutoplayWatchdog();",
                         null,
                     )
-                    CookieManager.getInstance().flush()
-                    webView.removeCallbacks(fallbackReadyRunnable)
-                    webView.postDelayed(fallbackReadyRunnable, 8_000L)
                 }
             }
 
@@ -406,7 +411,6 @@ fun EmbeddedWebPlayer(
                 error: WebResourceError?,
             ) {
                 if (request?.isForMainFrame == true) {
-                    webView.removeCallbacks(fallbackReadyRunnable)
                     onError(
                         "Embed Load Error",
                         error?.description?.toString() ?: "Unable to load broadcast embed.",
@@ -420,7 +424,6 @@ fun EmbeddedWebPlayer(
                 errorResponse: WebResourceResponse?,
             ) {
                 if (request?.isForMainFrame == true) {
-                    webView.removeCallbacks(fallbackReadyRunnable)
                     val code = errorResponse?.statusCode ?: 500
                     onError(
                         "Embed Unavailable (HTTP $code)",
@@ -440,7 +443,6 @@ fun EmbeddedWebPlayer(
         lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
 
         onDispose {
-            webView.removeCallbacks(fallbackReadyRunnable)
             lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
             controller.detach(webView)
             runCatching { webView.removeJavascriptInterface("PpvEmbedBridge") }
@@ -504,9 +506,9 @@ private const val EMBED_COMPAT_SCRIPT = """
     }
   }
 
-  cleanDom(document);
   if (window.__ppvEmbedGuardInstalled) return;
   window.__ppvEmbedGuardInstalled = true;
+  cleanDom(document);
   window.__ppvUserPaused = false;
   window.__ppvUserToggledMute = false;
   window.__ppvHasStarted = false;
@@ -567,7 +569,7 @@ private const val EMBED_COMPAT_SCRIPT = """
     var vids = document.querySelectorAll('video');
     for (var i = 0; i < vids.length; i++) {
       var v = vids[i];
-      if (!v.paused && !v.ended && v.readyState >= 2) {
+      if (!v.paused && !v.ended && v.readyState >= 3) {
         return true;
       }
     }
@@ -720,7 +722,7 @@ private const val EMBED_COMPAT_SCRIPT = """
       }
     });
     v.addEventListener('waiting', function() {
-      if (!window.__ppvUserPaused && !isVideoPlaying()) {
+      if (!window.__ppvUserPaused) {
         reportState('buffering', !!v.muted);
       }
     });
@@ -775,7 +777,7 @@ private const val EMBED_COMPAT_SCRIPT = """
       reportState('playing', getCurrentMuted());
     });
     inst.on('buffer', function() {
-      if (!window.__ppvUserPaused && !isVideoPlaying()) {
+      if (!window.__ppvUserPaused) {
         reportState('buffering', getCurrentMuted());
       }
     });
@@ -785,8 +787,10 @@ private const val EMBED_COMPAT_SCRIPT = """
       }
     });
     inst.on('idle', function() {
-      if (window.__ppvHasStarted || window.__ppvUserPaused) {
-        reportState('idle', getCurrentMuted());
+      if (window.__ppvUserPaused) {
+        reportState('paused', getCurrentMuted());
+      } else if (window.__ppvHasStarted) {
+        reportState('buffering', getCurrentMuted());
       }
     });
     inst.on('mute', function(ev) {
@@ -968,6 +972,10 @@ private const val EMBED_COMPAT_SCRIPT = """
 
   window.__ppvUserActionPlay = function() {
     window.__ppvUserPaused = false;
+    if (isPlayingOrBuffering()) {
+      reportState(isVideoPlaying() ? 'playing' : 'buffering', getCurrentMuted());
+      return;
+    }
     scanVideos();
     var jw = getJwInstance();
     ensureUnmutedByDefault(jw);

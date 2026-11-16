@@ -8,7 +8,9 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -25,6 +27,7 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
@@ -49,7 +52,13 @@ fun NativeMediaPlayer(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    var autoReconnectAttempts by remember(streamUrl, reloadNonce) { mutableIntStateOf(0) }
+    val latestUserPaused by rememberUpdatedState(userPaused)
+    var autoReconnectAttempts by remember { mutableIntStateOf(0) }
+    var pendingError by remember { mutableStateOf<PlaybackException?>(null) }
+    var playbackActive by remember { mutableStateOf(false) }
+    var isForeground by remember {
+        mutableStateOf(lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
 
     val trackSelector = remember {
         DefaultTrackSelector(context)
@@ -70,6 +79,12 @@ fun NativeMediaPlayer(
         ExoPlayer.Builder(context)
             .setTrackSelector(trackSelector)
             .setMediaSourceFactory(DefaultMediaSourceFactory(httpFactory))
+            .setLoadControl(
+                DefaultLoadControl.Builder()
+                    .setBufferDurationsMs(30_000, 60_000, 1_500, 5_000)
+                    .setPrioritizeTimeOverSizeThresholds(true)
+                    .build(),
+            )
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
@@ -84,10 +99,24 @@ fun NativeMediaPlayer(
 
     LaunchedEffect(streamUrl, reloadNonce) {
         autoReconnectAttempts = 0
+        pendingError = null
+        trackSelector.parameters = trackSelector.buildUponParameters()
+            .clearOverridesOfType(C.TRACK_TYPE_AUDIO)
+            .build()
+        onAudioTracksUpdated(emptyList())
         onBuffering()
-        exoPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(streamUrl)))
+        exoPlayer.setMediaItem(
+            MediaItem.Builder()
+                .setUri(Uri.parse(streamUrl))
+                .setLiveConfiguration(
+                    MediaItem.LiveConfiguration.Builder()
+                        .setTargetOffsetMs(12_000L)
+                        .build(),
+                )
+                .build(),
+        )
         exoPlayer.prepare()
-        exoPlayer.playWhenReady = !userPaused
+        exoPlayer.playWhenReady = !latestUserPaused && isForeground
     }
 
     LaunchedEffect(selectedAudioTrack) {
@@ -101,15 +130,15 @@ fun NativeMediaPlayer(
             .build()
     }
 
-    DisposableEffect(exoPlayer) {
+    DisposableEffect(exoPlayer, lifecycleOwner) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 when (playbackState) {
                     Player.STATE_BUFFERING -> onBuffering()
                     Player.STATE_READY -> {
-                        if (exoPlayer.isPlaying || exoPlayer.playWhenReady) {
+                        if (exoPlayer.isPlaying) {
                             onPlaying()
-                        } else {
+                        } else if (latestUserPaused) {
                             onPaused()
                         }
                     }
@@ -122,9 +151,10 @@ fun NativeMediaPlayer(
             }
 
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                playbackActive = isPlaying
                 if (isPlaying) {
                     onPlaying()
-                } else if (exoPlayer.playbackState == Player.STATE_READY && !exoPlayer.playWhenReady) {
+                } else if (exoPlayer.playbackState == Player.STATE_READY && latestUserPaused) {
                     onPaused()
                 }
             }
@@ -154,26 +184,20 @@ fun NativeMediaPlayer(
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                if (autoReconnectAttempts < 2) {
-                    autoReconnectAttempts += 1
-                    onBuffering()
-                    exoPlayer.prepare()
-                    exoPlayer.playWhenReady = true
-                } else {
-                    onError(
-                        "Playback Error (${error.errorCodeName})",
-                        error.localizedMessage ?: "Unable to play stream via Media3 ExoPlayer.",
-                    )
-                }
+                pendingError = error
             }
         }
         exoPlayer.addListener(listener)
 
         val lifecycleObserver = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_PAUSE -> exoPlayer.pause()
+                Lifecycle.Event.ON_PAUSE -> {
+                    isForeground = false
+                    exoPlayer.pause()
+                }
                 Lifecycle.Event.ON_RESUME -> {
-                    if (!userPaused) {
+                    isForeground = true
+                    if (!latestUserPaused && pendingError == null) {
                         exoPlayer.play()
                     }
                 }
@@ -185,16 +209,42 @@ fun NativeMediaPlayer(
         onDispose {
             lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
             exoPlayer.removeListener(listener)
+        }
+    }
+
+    DisposableEffect(exoPlayer) {
+        onDispose {
             playerRefCallback(null)
             exoPlayer.release()
         }
     }
 
-    // Small safety check if buffering stalls on launch
-    LaunchedEffect(autoReconnectAttempts) {
-        if (autoReconnectAttempts > 0) {
-            delay(1_200L)
+    // Buffering is left entirely to ExoPlayer. Only explicit errors can retry.
+    LaunchedEffect(pendingError, streamUrl, reloadNonce, isForeground, userPaused) {
+        val error = pendingError ?: return@LaunchedEffect
+        if (!isForeground || userPaused) return@LaunchedEffect
+        if (!isRecoverablePlaybackError(error) || autoReconnectAttempts >= 3) {
+            onError(
+                "Playback Error (${error.errorCodeName})",
+                error.localizedMessage ?: "Unable to play this stream. Retry or select another source.",
+            )
+            return@LaunchedEffect
         }
+        onBuffering()
+        delay(1_000L shl autoReconnectAttempts)
+        autoReconnectAttempts += 1
+        pendingError = null
+        if (error.errorCode == PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW) {
+            exoPlayer.seekToDefaultPosition()
+        }
+        exoPlayer.prepare()
+        exoPlayer.playWhenReady = !latestUserPaused && isForeground
+    }
+
+    LaunchedEffect(playbackActive, streamUrl, reloadNonce) {
+        if (!playbackActive) return@LaunchedEffect
+        delay(30_000L)
+        autoReconnectAttempts = 0
     }
 
     AndroidView(
@@ -218,4 +268,17 @@ fun NativeMediaPlayer(
             }
         },
     )
+}
+
+@OptIn(UnstableApi::class)
+private fun isRecoverablePlaybackError(error: PlaybackException): Boolean = when (error.errorCode) {
+    PlaybackException.ERROR_CODE_BEHIND_LIVE_WINDOW,
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> true
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
+        val status = (error.cause as? DefaultHttpDataSource.InvalidResponseCodeException)?.responseCode
+        status == 408 || status == 429 || (status != null && status >= 500)
+    }
+    else -> false
 }

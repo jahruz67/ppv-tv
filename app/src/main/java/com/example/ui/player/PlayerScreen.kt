@@ -88,7 +88,9 @@ fun PlayerScreen(
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     var exoPlayerRef by remember { mutableStateOf<ExoPlayer?>(null) }
-    var selectedAudioTrack by remember { mutableStateOf<AudioTrackOption?>(null) }
+    var selectedAudioTrack by remember(state.activeSource?.id, state.reloadNonce) {
+        mutableStateOf<AudioTrackOption?>(null)
+    }
     val webEmbedController = remember { WebEmbedController() }
 
     val retryFocusRequester = remember { FocusRequester() }
@@ -104,14 +106,16 @@ fun PlayerScreen(
         }
     }
 
-    LaunchedEffect(state.playbackStatus) {
-        if (state.playbackStatus is PlaybackStatus.Error || state.playbackStatus is PlaybackStatus.Unsupported) {
+    val hasPlaybackError = state.playbackStatus is PlaybackStatus.Error ||
+        state.playbackStatus is PlaybackStatus.Unsupported
+    LaunchedEffect(hasPlaybackError) {
+        if (hasPlaybackError) {
             runCatching { retryFocusRequester.requestFocus() }
         }
     }
 
-    LaunchedEffect(state.controlsVisible, state.playbackStatus) {
-        if (state.playbackStatus is PlaybackStatus.Error || state.playbackStatus is PlaybackStatus.Unsupported) {
+    LaunchedEffect(state.controlsVisible, hasPlaybackError) {
+        if (hasPlaybackError) {
             return@LaunchedEffect
         }
         if (state.controlsVisible) {
@@ -140,12 +144,12 @@ fun PlayerScreen(
                         val player = exoPlayerRef
                         when {
                             player != null -> {
-                                if (player.isPlaying) {
+                                if (!state.userPaused) {
                                     player.pause()
                                     viewModel.onPaused()
                                 } else {
+                                    viewModel.onPlayRequested()
                                     player.play()
-                                    viewModel.onPlaying()
                                 }
                                 true
                             }
@@ -163,8 +167,8 @@ fun PlayerScreen(
                         val player = exoPlayerRef
                         when {
                             player != null -> {
+                                viewModel.onPlayRequested()
                                 player.play()
-                                viewModel.onPlaying()
                                 true
                             }
                             activeSource?.playbackMode == PlaybackMode.WEB_EMBED -> {
@@ -277,10 +281,10 @@ fun PlayerScreen(
                 ) {
                     CircularProgressIndicator(color = TvPrimary, modifier = Modifier.size(26.dp))
                     Text(
-                        text = if (activeSource?.playbackMode == PlaybackMode.NATIVE_MEDIA3) {
-                            "Connecting Media3 stream..."
+                        text = if (state.playbackStatus is PlaybackStatus.Buffering) {
+                            "Buffering..."
                         } else {
-                            "Loading broadcast embed..."
+                            "Connecting to stream..."
                         },
                         style = MaterialTheme.typography.titleMedium,
                         color = TvTextPrimary,
@@ -448,20 +452,20 @@ fun PlayerScreen(
                     val hasPlayPauseButton = hasNativePlayPause || hasWebPlayPause
 
                     if (hasPlayPauseButton) {
-                        val isPlaying = state.playbackStatus is PlaybackStatus.Playing
+                        val showPause = !state.userPaused
                         Button(
                             onClick = {
                                 if (hasNativePlayPause) {
                                     val player = exoPlayerRef ?: return@Button
-                                    if (player.isPlaying) {
+                                    if (showPause) {
                                         player.pause()
                                         viewModel.onPaused()
                                     } else {
+                                        viewModel.onPlayRequested()
                                         player.play()
-                                        viewModel.onPlaying()
                                     }
                                 } else {
-                                    if (isPlaying) {
+                                    if (showPause) {
                                         webEmbedController.pause()
                                     } else {
                                         webEmbedController.play()
@@ -473,12 +477,12 @@ fun PlayerScreen(
                                 .testTag("player_play_pause_button"),
                         ) {
                             Icon(
-                                imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                                contentDescription = if (isPlaying) "Pause" else "Play",
+                                imageVector = if (showPause) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                                contentDescription = if (showPause) "Pause" else "Play",
                                 modifier = Modifier.size(18.dp),
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text(if (isPlaying) "Pause" else "Play")
+                            Text(if (showPause) "Pause" else "Play")
                         }
                     }
 

@@ -33,7 +33,10 @@ class PpvStreamRepository(
     private var memorySnapshot: CatalogSnapshot? = null
     private val cacheFile: File by lazy { File(context.cacheDir, "ppv_streams_cache.json") }
 
-    override suspend fun getCatalog(forceRefresh: Boolean): Result<CatalogSnapshot> {
+    override suspend fun getCatalog(forceRefresh: Boolean): Result<CatalogSnapshot> =
+        withContext(Dispatchers.Default) { loadCatalog(forceRefresh) }
+
+    private suspend fun loadCatalog(forceRefresh: Boolean): Result<CatalogSnapshot> {
         return mutex.withLock {
             val nowMs = clockMs()
             val cachedInMemory = memorySnapshot

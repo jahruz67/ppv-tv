@@ -57,7 +57,7 @@ class PpvTvApplication : Application(), ImageLoaderFactory {
                     .maxSizeBytes(32L * 1024L * 1024L)
                     .build()
             }
-            .crossfade(150)
+            .crossfade(false)
             .build()
     }
 }

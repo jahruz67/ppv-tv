@@ -55,6 +55,7 @@ class PlayerViewModel(
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
 
     private var autoHideJob: Job? = null
+    private var lastSavedSource: Pair<Int, String>? = null
 
     fun initialize(event: SportEvent?, initialSourceIndex: Int) {
         if (event == null) {
@@ -130,14 +131,23 @@ class PlayerViewModel(
     }
 
     fun onBuffering() {
+        autoHideJob?.cancel()
         _uiState.update { it.copy(playbackStatus = PlaybackStatus.Buffering) }
+    }
+
+    fun onPlayRequested() {
+        _uiState.update {
+            if (it.userPaused) it.copy(userPaused = false, playbackStatus = PlaybackStatus.Buffering) else it
+        }
     }
 
     fun onPlaying() {
         val state = _uiState.value
+        if (state.playbackStatus is PlaybackStatus.Playing && !state.userPaused) return
         val eventId = state.event?.id
         val sourceId = state.activeSource?.id
-        if (eventId != null && sourceId != null) {
+        if (eventId != null && sourceId != null && lastSavedSource != (eventId to sourceId)) {
+            lastSavedSource = eventId to sourceId
             viewModelScope.launch {
                 preferences.saveLastSelectedSource(eventId, sourceId)
             }
