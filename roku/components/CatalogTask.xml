@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="CatalogTask" extends="Task">
+    <interface>
+        <field id="apiUrl" type="string" />
+        <field id="result" type="node" alwaysNotify="true" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/source/catalog.brs" />
+    <script type="text/brightscript" uri="pkg:/components/CatalogTask.brs" />
+</component>

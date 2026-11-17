@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="PlaybackTask" extends="Task">
+    <interface>
+        <field id="bridgeUrl" type="string" />
+        <field id="iframe" type="string" />
+        <field id="requestId" type="integer" />
+        <field id="result" type="node" alwaysNotify="true" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/source/catalog.brs" />
+    <script type="text/brightscript" uri="pkg:/components/PlaybackTask.brs" />
+</component>

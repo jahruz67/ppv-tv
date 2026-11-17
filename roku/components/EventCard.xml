@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="EventCard" extends="Group">
+    <interface>
+        <field id="itemContent" type="node" onChange="onContentChanged" />
+    </interface>
+    <script type="text/brightscript" uri="pkg:/components/EventCard.brs" />
+    <children>
+        <Rectangle width="352" height="220" color="0x131C2EFF" />
+        <Poster width="352" height="150" uri="pkg:/images/event-fallback.jpg" loadDisplayMode="scaleToZoom" />
+        <Poster id="poster" width="352" height="150" loadDisplayMode="scaleToZoom" />
+        <Label id="title" translation="[12,154]" width="328" height="36" font="font:SmallBoldSystemFont" color="0xF8FAFCFF" />
+        <Label id="status" translation="[12,190]" width="328" height="26" font="font:SmallSystemFont" color="0x00E5FFFF" />
+    </children>
+</component>

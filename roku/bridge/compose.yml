@@ -1,0 +1,9 @@
+# External PPV-specific resolver; no third-party source is vendored in this app.
+# Pin the source revision so app and bridge protocol changes can be reviewed together.
+services:
+  playback-bridge:
+    build:
+      context: https://github.com/Lunatic16/ppv-hls-proxy.git#0f91ece96dc33cfda83948264948452bc988bb54
+    ports:
+      - "${ROKU_BRIDGE_PORT:-3003}:3000"
+    restart: unless-stopped

@@ -1,47 +1,93 @@
-# PPV.st Android TV Application
+# PPV.st TV
 
-Native Android TV application built with **Kotlin**, **Jetpack Compose for TV (`androidx.tv:tv-material`)**, **AndroidX Media3 ExoPlayer**, **Android WebView**, **Retrofit + Kotlinx Serialization**, **DataStore**, and **Coil**.
+Android TV app and Roku channel for PPV events and 24/7 streams, with sports
+categories, event status, and source selection.
 
-## Features Implemented
+- **Android TV:** standalone app with native video and embedded web playback.
+- **Roku TV:** embedded streams use a Docker playback bridge on your PC or home
+  server. **Roku playback has not yet been verified end to end.**
 
-- **Direct PPV.st API Integration (`https://api.ppv.st/api/streams`)**:
-  - Strongly typed Kotlinx Serialization DTOs with resilient deserializers (`FlexibleBooleanSerializer`, `FlexibleIntSerializer`) for API field variations.
-  - Memory + disk JSON caching (`ppv_streams_cache.json`) with configurable base URL (`BuildConfig.PPV_API_BASE_URL` / DataStore override), controlled 90s periodic refresh, and offline verification fixture fallback (`FixtureCatalog`) clearly badged in the UI.
-- **Television-First Home & Browse Screens**:
-  - **Featured Live Hero Banner**, **Live Now**, **Upcoming Events** (converted to device local timezone), **24/7 Channels**, **Dynamic Sports Categories**, **Favorites**, and **Remote-Friendly Search**.
-- **Event Status Engine**:
-  - Computes `LIVE`, `UPCOMING`, `ENDED`, and `24/7` (`ALWAYS_LIVE`) using `starts_at`, `ends_at`, and `always_live` without blindly marking unscheduled items live.
-  - Sorts live events first (by viewer count), upcoming events chronologically, and keeps 24/7 channels accessible separately.
-- **Dual Playback Architecture**:
-  - **Native Media3 ExoPlayer (`NativeMediaPlayer`)**: Supports HLS (`.m3u8`), DASH (`.mpd`), and MP4 streams with audio focus, lifecycle pause/resume, bounded automatic reconnects, and audio track selection.
-  - **Fullscreen WebView Embed Player (`EmbeddedWebPlayer`)**: Supports HTML iframe streams via `WebChromeClient` HTML5 fullscreen video, HTTP/network error interception, safe WebView disposal, and TV-remote accessible overlay controls (preventing focus traps).
-- **Source Switching & Recovery**:
-  - Discovers primary + `substreams` variants (broadcaster, quality, language) dynamically.
-  - Remembers last successfully played source per event in DataStore.
-  - Surfaces **Retry**, **Change Source**, and **Back to Event** without auto-cycling through failed sources.
-- **Android TV Compatibility & D-Pad Navigation**:
-  - Declares `LEANBACK_LAUNCHER`, `android:banner="@drawable/tv_banner"`, `android.hardware.touchscreen` `required="false"`, landscape orientation, and full D-pad/Play-Pause/Menu/Back key handling.
+Run the commands below from the repository root.
 
-## Project Structure
+## Android TV
 
-- `data/api/` — `PpvApiService`, `NetworkModule`
-- `data/models/` — `PpvApiDtos`, `FixtureCatalog`
-- `data/repository/` — `StreamRepository` / `PpvStreamRepository`
-- `domain/models/` — `SportEvent`, `StreamSource`, `SportCategory`, `EventStatus`, `PlaybackMode`, `CatalogSnapshot`
-- `domain/playback/` — `PlaybackStrategyResolver`
-- `domain/usecase/` — `EventStatusCalculator`, `EventCatalogMapper`, `SearchEventsUseCase`
-- `preferences/` — `UserPreferencesDataStore`
-- `navigation/` — `AppDestinations`, `PpvTvNavHost`
-- `ui/` — `home`, `categories`, `channels`, `events`, `player`, `search`, `favorites`, `components`, `theme`
+### Install
 
-## Building & Testing
+In GitHub, open **Actions → Build Android TV APK**, select a successful run,
+and download **ppvst-tv-debug-apk**. Extract the download and sideload the APK
+onto your Android TV.
 
-```bash
-gradle :app:testDebugUnitTest
+### Build locally
+
+Requires JDK 21, Gradle 9.3.1, and the project's Android SDK installed/configured.
+
+```sh
 gradle :app:assembleDebug
 ```
 
-Debug APK output path:
-`app/build/outputs/apk/debug/app-debug.apk`
+APK: `app/build/outputs/apk/debug/app-debug.apk`
 
-See `API_VERIFICATION.md` for the live PPV.st API investigation and verification status.
+Unit tests: `gradle :app:testDebugUnitTest`
+
+## Roku TV
+
+Requires **PowerShell 7**, **Docker Desktop running with Linux containers**, and
+a Roku on the same home network as the Docker host. **The host must stay on and
+awake while you watch.** No public internet exposure or router port forwarding
+is needed.
+
+### 1. Start the playback bridge
+
+```sh
+docker compose -f ./roku/bridge/compose.yml up -d --build
+```
+
+The first run downloads and builds the external
+[PPV resolver](https://github.com/Lunatic16/ppv-hls-proxy). It resolves embedded
+sources and relays video through port **3003**.
+
+### 2. Build and install the Roku app
+
+```powershell
+pwsh -File ./roku/build.ps1
+```
+
+ZIP: `build/roku/ppvst-roku.zip`
+
+Alternatively, download **ppvst-roku-channel** from a successful
+**Actions → Build Roku TV Channel** run and extract the download to get this ZIP.
+
+[Enable Roku developer mode](https://developer.roku.com/dev/docs/developer-setup),
+open the Roku's displayed address in your computer's browser, log in as
+**rokudev** with the password you created, and upload the ZIP.
+
+### 3. Point Roku at the bridge
+
+Find the Docker host's LAN IP address (`ipconfig` on Windows). In the Roku app,
+press **\* → Playback bridge address** and enter, for example:
+
+```text
+http://192.168.1.50:3003
+```
+
+Save, select an event, and choose a source. Use your host's actual IP address;
+`localhost` on Roku refers to the TV itself.
+
+## Configuration
+
+| Setting | Where to change it | Rebuild required? |
+| --- | --- | --- |
+| Roku playback bridge address | Roku app: **\* → Playback bridge address** | No; saved on the Roku |
+| Roku default bridge address | `bridgeUrl` in [roku/config.json](roku/config.json) | Yes; a saved address takes precedence |
+| Roku catalog API | `apiUrl` in [roku/config.json](roku/config.json) | Yes |
+
+Event listings and individual stream URLs are fetched at runtime.
+
+For bridge errors, check its logs:
+
+```sh
+docker compose -f ./roku/bridge/compose.yml logs --tail 50
+```
+
+See [Roku setup and troubleshooting](roku/README.md) and
+[API investigation and verification status](API_VERIFICATION.md).

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<component name="CatalogScene" extends="Scene">
+    <script type="text/brightscript" uri="pkg:/source/catalog.brs" />
+    <script type="text/brightscript" uri="pkg:/components/CatalogScene.brs" />
+    <children>
+        <Label translation="[64,36]" width="700" height="52" text="PPV.st TV" font="font:LargeBoldSystemFont" color="0xFF2D55FF" />
+        <Label id="status" translation="[64,98]" width="1152" height="46" text="Loading events..." wrap="true" font="font:SmallSystemFont" color="0x94A3B8FF" />
+        <RowList id="rows" translation="[64,162]" itemComponentName="EventCard" numRows="2" itemSize="[1152,248]" itemSpacing="[0,20]" rowItemSize="[[352,220]]" rowItemSpacing="[[24,0]]" showRowLabel="[true]" rowLabelColor="0xF8FAFCFF" rowFocusAnimationStyle="floatingFocus" />
+        <Label translation="[64,682]" width="1152" height="28" text="Arrow keys: browse     OK: choose source     *: settings / refresh     Back: return" font="font:SmallSystemFont" color="0x94A3B8FF" />
+        <Timer id="refreshTimer" duration="90" repeat="true" />
+        <Video id="video" width="1280" height="720" visible="false" />
+    </children>
+</component>
