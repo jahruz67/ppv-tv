@@ -27,6 +27,7 @@ import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -277,7 +278,7 @@ private fun isRecoverablePlaybackError(error: PlaybackException): Boolean = when
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
     PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT -> true
     PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS -> {
-        val status = (error.cause as? DefaultHttpDataSource.InvalidResponseCodeException)?.responseCode
+        val status = (error.cause as? HttpDataSource.InvalidResponseCodeException)?.responseCode
         status == 408 || status == 429 || (status != null && status >= 500)
     }
     else -> false
